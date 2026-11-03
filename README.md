@@ -168,6 +168,12 @@ dotnet publish src/LexArcana -c Release -r linux-x64
 
 Il risultato in `src/LexArcana/bin/Release/net10.0/linux-x64/publish/lexarcana` è compilato con Native AOT: si avvia subito e funziona su computer senza .NET installato. Su Windows usa `-r win-x64`, su macOS `-r osx-arm64`; serve il toolchain C/C++ della piattaforma (vedi la documentazione di Native AOT).
 
+Gli eseguibili autosufficienti contengono il runtime .NET, fissato in `Directory.Build.props` (oggi **10.0.14**, l'ultimo aggiornamento di .NET 10). Per controllare quale runtime contiene un eseguibile:
+
+```bash
+lexarcana --versione
+```
+
 Per distribuire il client 3D senza richiedere .NET:
 
 ```bash

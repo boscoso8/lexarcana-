@@ -1,6 +1,6 @@
 // Red3D.cs — Lex Arcana: rete e 3D in un solo file.
 // Generato da tools/GeneraRed3D.cs: non modificarlo a mano, modifica i sorgenti in src/ e rigeneralo.
-// Contiene 37 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
+// Contiene 38 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
 //
 // Avvio del client 3D: dotnet run --project Red3D -- --personaggio aurelia.json --host <indirizzo del Demiurgo>
 // Il server e gli strumenti (personaggi, campagne) sono nel progetto completo: src/LexArcana.
@@ -20,6 +20,8 @@ using System.Globalization;
 using System.Net.Sockets;
 using System.Net;
 using System.Numerics;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using System.Text.Json;
@@ -29,6 +31,12 @@ using System.Threading.Channels;
 
 // ===== src/LexArcana.Visione/Program.cs =====
 // Tutto avviene sul thread principale: la finestra (GLFW) lo richiede, soprattutto su macOS.
+if (args is ["--versione" or "--version"])
+{
+    Console.WriteLine(LexArcana.Versions.Describe("Lex Arcana · visione 3D"));
+    return 0;
+}
+
 if (!VisioneOptions.TryParse(args, out var options, out var error))
 {
     if (error.Length > 0) Console.Error.WriteLine(error + "\n");
@@ -3235,6 +3243,22 @@ namespace LexArcana.Ui
     }
 }
 
+// ===== src/LexArcana.Core/Versions.cs =====
+namespace LexArcana
+{
+    /// <summary>Le versioni del gioco e del runtime .NET con cui gira (incluso nell'eseguibile, se è autosufficiente).</summary>
+    public static class Versions
+    {
+        public static string Game =>
+            typeof(Versions).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "?";
+
+        public static string Runtime => RuntimeInformation.FrameworkDescription;
+
+        public static string Describe(string program) =>
+            $"{program} {Game} · {Runtime} · {RuntimeInformation.RuntimeIdentifier}";
+    }
+}
+
 // ===== src/LexArcana.Visione/Avatar.cs =====
 namespace LexArcana.Visione
 {
@@ -4329,6 +4353,8 @@ namespace LexArcana.Visione
             lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
                 Entra nella sessione di un Demiurgo e guarda il mondo con gli occhi del tuo personaggio.
                 Il personaggio si crea con: lexarcana personaggio --nome <nome>
+            lexarcana-visione --versione
+                Mostra la versione del gioco e del runtime .NET che contiene.
 
             Opzioni per provare il rendering:
                 --cattura <file.png>   salva un'immagine della finestra ed esce

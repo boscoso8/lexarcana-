@@ -4,6 +4,12 @@ using LexArcana.Net;
 using LexArcana.Visione;
 
 // Tutto avviene sul thread principale: la finestra (GLFW) lo richiede, soprattutto su macOS.
+if (args is ["--versione" or "--version"])
+{
+    Console.WriteLine(LexArcana.Versions.Describe("Lex Arcana · visione 3D"));
+    return 0;
+}
+
 if (!VisioneOptions.TryParse(args, out var options, out var error))
 {
     if (error.Length > 0) Console.Error.WriteLine(error + "\n");

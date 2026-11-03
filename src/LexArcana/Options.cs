@@ -6,7 +6,7 @@ using LexArcana.Net;
 
 namespace LexArcana.App;
 
-internal enum Mode { Help, Server, Client, Character, Campaign }
+internal enum Mode { Help, Version, Server, Client, Character, Campaign }
 
 /// <summary>Le opzioni della riga di comando, per tutte le modalità.</summary>
 internal sealed record Options
@@ -41,6 +41,9 @@ internal sealed record Options
         lexarcana personaggio --nome <nome> [--file <nome>.json] [--casuale [--seme <numero>]]
             Crea un personaggio passo per passo (o a caso con --casuale) e lo salva in un file.
 
+        lexarcana --versione
+            Mostra la versione del gioco e del runtime .NET che contiene.
+
         lexarcana campagna [--seme <numero>] [--avventure 4] [--cartella campagne]
             Genera una campagna: il manuale del Demiurgo (campagna.md), il file per il server
             (campagna.json) e la mappa 3D di ogni avventura (avventura-N.txt).
@@ -53,6 +56,11 @@ internal sealed record Options
         options = new() { Mode = Mode.Help };
         error = "";
         if (args is [] or ["-h" or "--help" or "aiuto", ..]) return true;
+        if (args is ["--versione" or "versione" or "--version", ..])
+        {
+            options = new() { Mode = Mode.Version };
+            return true;
+        }
 
         Mode mode = args[0].ToLowerInvariant() switch
         {

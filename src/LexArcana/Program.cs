@@ -24,11 +24,18 @@ return options.Mode switch
     Mode.Client => await PlayerConsole.RunAsync(options, palette, stop.Token),
     Mode.Character => await CharacterConsole.RunAsync(options, palette, stop.Token),
     Mode.Campaign => CampaignConsole.Run(options, palette),
+    Mode.Version => PrintVersion(),
     _ => ShowUsage(),
 };
 
 static int ShowUsage()
 {
     Console.WriteLine(Options.Usage);
+    return 0;
+}
+
+static int PrintVersion()
+{
+    Console.WriteLine(LexArcana.Versions.Describe("Lex Arcana"));
     return 0;
 }

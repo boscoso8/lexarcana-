@@ -11,6 +11,8 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
         lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
             Entra nella sessione di un Demiurgo e guarda il mondo con gli occhi del tuo personaggio.
             Il personaggio si crea con: lexarcana personaggio --nome <nome>
+        lexarcana-visione --versione
+            Mostra la versione del gioco e del runtime .NET che contiene.
 
         Opzioni per provare il rendering:
             --cattura <file.png>   salva un'immagine della finestra ed esce
