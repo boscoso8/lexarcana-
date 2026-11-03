@@ -29,8 +29,8 @@ internal static class PlayerConsole
 
         await using (client)
         {
-            var renderer = new MessageRenderer(p, client.Name);
-            Terminal.WriteLine(renderer.Render(client.Welcome));
+            var renderer = new MessageRenderer(client.Name);
+            Terminal.WriteLine(p, renderer.Render(client.Welcome));
 
             using var session = CancellationTokenSource.CreateLinkedTokenSource(stop);
             var receiving = ReceiveAsync(client, renderer, p, session);
@@ -65,7 +65,7 @@ internal static class PlayerConsole
         {
             await foreach (var message in client.ReadAllAsync(session.Token))
             {
-                Terminal.WriteLine(renderer.Render(message));
+                Terminal.WriteLine(p, renderer.Render(message));
                 if (message is Expelled) farewell = null; // il motivo è già stato mostrato
             }
         }

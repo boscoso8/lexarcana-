@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
+using LexArcana.Game;
 using LexArcana.Net;
 using LexArcana.Protocol;
 
@@ -139,6 +140,47 @@ public sealed class SessionTests
         Assert.Equal("disturbi la quiete", (await marcoInbox.NextAsync<Expelled>()).Reason);
         Assert.Equal("Marco", (await demiurge.NextAsync<Left>()).Name);
         await marco.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Positions_are_shared_and_impossible_moves_are_corrected()
+    {
+        var (server, _) = StartServer();
+        await using var _s = server;
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+
+        Assert.Equal("Livia", (await marcoInbox.NextAsync<Moved>()).Name); // dove è comparsa Livia
+        var start = server.PoseOf("Livia")!.Value;
+
+        // un passo valido arriva agli altri
+        livia.Send(new Move(start.X, start.Z - 0.5f, 1f));
+        var moved = await marcoInbox.NextAsync<Moved>();
+        Assert.Equal(("Livia", start.Z - 0.5f, 1f), (moved.Name, moved.Z, moved.Yaw));
+
+        // attraverso un muro o con un salto troppo lungo: il server rimanda la posizione buona e non la diffonde
+        livia.Send(new Move(-5f, start.Z, 0));
+        var corrected = await liviaInbox.NextAsync<Moved>();
+        Assert.Equal(("Livia", start.Z - 0.5f), (corrected.Name, corrected.Z));
+        livia.Send(new Move(start.X, start.Z - GameServer.MaxStep - 2f, 0));
+        Assert.Equal(start.Z - 0.5f, (await liviaInbox.NextAsync<Moved>()).Z);
+        Assert.False(await marcoInbox.SeesAsync<Moved>(TimeSpan.FromMilliseconds(300)));
+
+        await Task.WhenAll(marco.DisposeAsync().AsTask(), livia.DisposeAsync().AsTask());
+    }
+
+    [Fact]
+    public async Task Welcome_carries_the_map_and_everyone_s_position()
+    {
+        var (server, _) = StartServer();
+        await using var _s = server;
+        await using var marco = await GameClient.ConnectAsync("127.0.0.1", server.Port, "Marco", ct: Ct);
+        await using var livia = await GameClient.ConnectAsync("127.0.0.1", server.Port, "Livia", ct: Ct);
+
+        Assert.Equal("Tempio di Giano", livia.Welcome.Map.Name);
+        Assert.Equal(GameMap.Default.Rows, livia.Welcome.Map.Rows);
+        Assert.Equal(["Livia", "Marco"], livia.Welcome.Positions.Select(p => p.Name).Order());
+        Assert.All(livia.Welcome.Positions, p => Assert.True(GameMap.Default.IsWalkable(p.X, p.Z)));
     }
 
     [Theory]

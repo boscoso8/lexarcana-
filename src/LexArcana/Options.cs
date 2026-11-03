@@ -7,11 +7,12 @@ namespace LexArcana.App;
 internal enum Mode { Help, Server, Client }
 
 /// <summary>Le opzioni della riga di comando.</summary>
-internal sealed record Options(Mode Mode, string? Host, int Port, string? Name, string? Password, bool Color)
+internal sealed record Options(Mode Mode, string? Host, int Port, string? Name, string? Password, bool Color, string? MapFile = null)
 {
     public const string Usage = """
-        lexarcana server [--porta 7777] [--indirizzo 0.0.0.0] [--parola-d-ordine <testo>] [--senza-colori]
+        lexarcana server [--porta 7777] [--indirizzo 0.0.0.0] [--parola-d-ordine <testo>] [--mappa <file>] [--senza-colori]
             Apre una sessione: tu sei il Demiurgo e conduci la partita da questo terminale.
+            --mappa sceglie il luogo (un file di testo: # muro, . pavimento, C colonna, A altare, S partenza).
 
         lexarcana client --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>] [--senza-colori]
             Ti collega alla sessione di un Demiurgo come giocatore.
@@ -33,7 +34,7 @@ internal sealed record Options(Mode Mode, string? Host, int Port, string? Name, 
                 return false;
         }
 
-        string? host = null, name = null, password = null;
+        string? host = null, name = null, password = null, mapFile = null;
         int port = GameServer.DefaultPort;
         bool color = true;
         for (int i = 1; i < args.Length; i++)
@@ -59,6 +60,10 @@ internal sealed record Options(Mode Mode, string? Host, int Port, string? Name, 
                     password = Value();
                     if (string.IsNullOrEmpty(password)) return Fail("--parola-d-ordine vuole un testo.", out error);
                     break;
+                case "--mappa" when mode == Mode.Server:
+                    mapFile = Value();
+                    if (string.IsNullOrWhiteSpace(mapFile)) return Fail("--mappa vuole il percorso di un file.", out error);
+                    break;
                 case "--senza-colori":
                     color = false;
                     break;
@@ -70,7 +75,7 @@ internal sealed record Options(Mode Mode, string? Host, int Port, string? Name, 
         if (mode == Mode.Client && !Names.IsValid(name))
             return Fail($"Il client vuole --nome: da 1 a {Names.MaxLength} lettere o cifre, senza spazi.", out error);
 
-        options = new(mode, host, port, name, password, color);
+        options = new(mode, host, port, name, password, color, mapFile);
         return true;
 
         static bool Fail(string message, out string error)

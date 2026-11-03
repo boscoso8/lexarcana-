@@ -10,6 +10,12 @@ internal static class Terminal
         lock (Gate) Console.WriteLine(text);
     }
 
+    /// <summary>Scrive un messaggio già impaginato; non fa nulla se è null (es. uno spostamento).</summary>
+    public static void WriteLine(Ui.Palette palette, Ui.StyledText? text)
+    {
+        if (text is not null) WriteLine(palette.Format(text));
+    }
+
     /// <summary>Le righe digitate, finché l'ingresso resta aperto o finché <paramref name="ct"/> non si attiva.</summary>
     public static async IAsyncEnumerable<string> ReadLinesAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {

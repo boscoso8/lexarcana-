@@ -14,11 +14,13 @@ namespace LexArcana.Net;
 /// Il Demiurgo non è un client: vede ogni messaggio tramite <c>demiurgeView</c>, compresi
 /// sussurri e tiri segreti, e agisce con <see cref="ExecuteAsync"/>.
 /// </summary>
-public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null)
+public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null)
     : IAsyncDisposable
 {
     public const int DefaultPort = 7777;
     public const int MaxPlayers = 16;
+    /// <summary>Lo spostamento massimo accettato tra due messaggi Move, in metri (copre qualche pacchetto in ritardo).</summary>
+    public const float MaxStep = 3f;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(15);
 
     private readonly TcpListener _listener = new(address, port);
@@ -26,6 +28,8 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     private readonly byte[]? _password = string.IsNullOrEmpty(password) ? null : Encoding.UTF8.GetBytes(password);
     private readonly ConcurrentDictionary<string, Player> _players = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CharacterSheet> _sheets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Pose> _poses = new(StringComparer.OrdinalIgnoreCase);
+    private int _nextSpawn;
     private readonly ConcurrentDictionary<Task, byte> _sessions = new();
     private readonly CancellationTokenSource _stopping = new();
     private Task? _acceptLoop;
@@ -39,6 +43,11 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
     public string[] PlayerNames => [.. _players.Keys.Order(StringComparer.OrdinalIgnoreCase)];
+
+    /// <summary>Il luogo della sessione.</summary>
+    public GameMap Map { get; } = map ?? GameMap.Default;
+
+    public Pose? PoseOf(string name) => _poses.TryGetValue(name, out var pose) ? pose : null;
 
     public void Start()
     {
@@ -87,7 +96,10 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         finally
         {
             if (player is not null && _players.TryRemove(new(player.Name, player)))
+            {
+                _poses.TryRemove(player.Name, out _);
                 Broadcast(new Left(player.Name));
+            }
             await connection.DisposeAsync();
         }
     }
@@ -116,8 +128,11 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         }
 
         SheetOf(player.Name);
-        player.Send(new Welcome(player.Name, Present()));
+        var spawn = Map.Spawns[(int)((uint)Interlocked.Increment(ref _nextSpawn) % Map.Spawns.Length)];
+        _poses[player.Name] = spawn;
+        player.Send(new Welcome(player.Name, Present(), new MapData(Map.Name, Map.Rows), Positions()));
         Broadcast(new Joined(player.Name), except: player.Name);
+        Broadcast(new Moved(player.Name, spawn.X, spawn.Z, spawn.Yaw), except: player.Name);
         return player;
 
         Player? Refuse(string reason)
@@ -139,6 +154,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         SetField(var key, var value) => SetSheetField(player.Name, player.Name, key, value),
         ShowSheet(var owner) => Sheet(owner ?? player.Name),
         ListPlayers => new PlayerList(Present()),
+        Move(var x, var z, var yaw) => MoveTo(player, new Pose(x, z, yaw)),
         Hello => new Refused("Sei già nella sessione."),
         _ => new Refused("Messaggio non previsto."),
     };
@@ -195,6 +211,34 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         _sheets.TryGetValue(owner, out var sheet)
             ? new SheetShown(sheet.Owner, sheet.Snapshot())
             : new Refused($"Non esiste una scheda di «{owner}».");
+
+    /// <summary>
+    /// Accetta una mossa se è un numero valido, non attraversa muri e non è un salto troppo lungo;
+    /// altrimenti rimanda al giocatore la sua ultima posizione valida.
+    /// </summary>
+    private Moved? MoveTo(Player player, Pose wanted)
+    {
+        var current = _poses.GetValueOrDefault(player.Name, Map.Spawns[0]);
+        if (!wanted.IsFinite || wanted.DistanceTo(current) > MaxStep || !Map.IsWalkable(wanted.X, wanted.Z))
+            return new Moved(player.Name, current.X, current.Z, current.Yaw);
+
+        var pose = wanted with { Yaw = NormalizeAngle(wanted.Yaw) };
+        _poses[player.Name] = pose;
+        var moved = Wire.Encode(new Moved(player.Name, pose.X, pose.Z, pose.Yaw));
+        foreach (var other in _players.Values)
+            if (other != player) other.Connection.Post(moved);
+        return null;
+    }
+
+    private static float NormalizeAngle(float radians)
+    {
+        var a = radians % MathF.Tau;
+        return a < 0 ? a + MathF.Tau : a;
+    }
+
+    private Position[] Positions() =>
+        [.. _players.Values.Select(p => (p.Name, Pose: _poses.GetValueOrDefault(p.Name)))
+            .Select(e => new Position(e.Name, e.Pose.X, e.Pose.Z, e.Pose.Yaw))];
 
     private CharacterSheet SheetOf(string name) => _sheets.GetOrAdd(name, static n => new CharacterSheet(n));
 

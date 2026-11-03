@@ -16,6 +16,12 @@ public class ProtocolTests
         Assert.Equal(("Livia", 7), (back.From, back.Total));
         Assert.Equal([3, 4], back.Dice);
 
+        var welcome = new Welcome("Livia", ["Demiurgo", "Livia"], new MapData("Sala", ["###", "#S#", "###"]), [new Position("Livia", 3, 3, 0.5f)]);
+        var back2 = Assert.IsType<Welcome>(Wire.DecodeServer(Wire.Encode(welcome)));
+        Assert.Equal(welcome.Map.Rows, back2.Map.Rows);
+        Assert.Equal(welcome.Positions, back2.Positions);
+        Assert.Equal(new Move(1.5f, 2f, 3f), Wire.DecodeClient(Wire.Encode(new Move(1.5f, 2f, 3f))));
+
         var hello = Assert.IsType<Hello>(Wire.DecodeClient(Wire.Encode(new Hello("Marco"))));
         Assert.Equal(("Marco", Wire.ProtocolVersion), (hello.Name, hello.Version));
     }

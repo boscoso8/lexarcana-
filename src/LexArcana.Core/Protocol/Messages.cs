@@ -17,6 +17,7 @@ namespace LexArcana.Protocol;
 [JsonDerivedType(typeof(ShowSheet), "show_sheet")]
 [JsonDerivedType(typeof(ListPlayers), "list_players")]
 [JsonDerivedType(typeof(Leave), "leave")]
+[JsonDerivedType(typeof(Move), "move")]
 public abstract record ClientMessage;
 
 /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -30,6 +31,8 @@ public sealed record SetField(string Key, string Value) : ClientMessage;
 public sealed record ShowSheet(string? Owner = null) : ClientMessage;
 public sealed record ListPlayers : ClientMessage;
 public sealed record Leave : ClientMessage;
+/// <summary>Dove si trova e dove guarda il personaggio (client 3D, circa 10 volte al secondo).</summary>
+public sealed record Move(float X, float Z, float Yaw) : ClientMessage;
 
 /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
@@ -44,9 +47,13 @@ public sealed record Leave : ClientMessage;
 [JsonDerivedType(typeof(PlayerList), "players")]
 [JsonDerivedType(typeof(Refused), "refused")]
 [JsonDerivedType(typeof(Expelled), "expelled")]
+[JsonDerivedType(typeof(Moved), "moved")]
 public abstract record ServerMessage;
 
-public sealed record Welcome(string Name, string[] Players, int Version = Wire.ProtocolVersion) : ServerMessage;
+/// <summary>L'accoglienza: chi c'è, il luogo (righe della mappa) e dove si trova ognuno, te compreso.</summary>
+public sealed record Welcome(string Name, string[] Players, MapData Map, Position[] Positions, int Version = Wire.ProtocolVersion) : ServerMessage;
+public sealed record MapData(string Name, string[] Rows);
+public sealed record Position(string Name, float X, float Z, float Yaw);
 public sealed record Joined(string Name) : ServerMessage;
 public sealed record Left(string Name) : ServerMessage;
 public sealed record Said(string From, string Text) : ServerMessage;
@@ -60,3 +67,5 @@ public sealed record PlayerList(string[] Names) : ServerMessage;
 /// <summary>Una richiesta respinta; se arriva in risposta a <see cref="Hello"/> la connessione si chiude.</summary>
 public sealed record Refused(string Reason) : ServerMessage;
 public sealed record Expelled(string? Reason = null) : ServerMessage;
+/// <summary>Un personaggio si è spostato. Se riguarda te, è il server che corregge una mossa non valida.</summary>
+public sealed record Moved(string Name, float X, float Z, float Yaw) : ServerMessage;

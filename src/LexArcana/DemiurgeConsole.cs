@@ -26,9 +26,25 @@ internal static class DemiurgeConsole
 
     public static async Task<int> RunAsync(Options options, Palette p, CancellationToken stop)
     {
-        var renderer = new MessageRenderer(p, Names.Demiurge);
+        var renderer = new MessageRenderer(Names.Demiurge);
         var address = options.Host is { } host ? IPAddress.Parse(host) : IPAddress.Any;
-        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(renderer.Render(m)), options.Password);
+        var map = GameMap.Default;
+        if (options.MapFile is { } file)
+        {
+            string[] lines;
+            try { lines = await File.ReadAllLinesAsync(file, stop); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                await Console.Error.WriteLineAsync(p.Pompeian($"Impossibile leggere la mappa {file}: {ex.Message}"));
+                return 1;
+            }
+            if (!GameMap.TryParse(lines, out map, out var error))
+            {
+                await Console.Error.WriteLineAsync(p.Pompeian($"Mappa {file} non valida: {error}"));
+                return 1;
+            }
+        }
+        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map);
         try
         {
             server.Start();
@@ -41,11 +57,12 @@ internal static class DemiurgeConsole
 
         await using (server)
         {
-            Terminal.WriteLine($"{p.Gilt(p.Bold("LEX ARCANA"))}{p.Muted(" · Sessione aperta. Sei il Demiurgo.")}");
+            Terminal.WriteLine($"{p.Gilt(p.Bold("LEX ARCANA"))}{p.Muted($" · Sessione aperta nel luogo «{server.Map.Name}». Sei il Demiurgo.")}");
             Terminal.WriteLine(p.Muted($"In ascolto su {address}:{server.Port}" +
                 (options.Password is null ? " · nessuna parola d'ordine" : " · con parola d'ordine")));
             Terminal.WriteLine(p.Muted("I giocatori si collegano con: ") +
-                p.Ink($"lexarcana client --host <indirizzo> --porta {server.Port} --nome <nome>"));
+                p.Ink($"lexarcana client --host <indirizzo> --porta {server.Port} --nome <nome>") +
+                p.Muted(" (testo) oppure lexarcana-visione con gli stessi argomenti (3D)"));
             Terminal.WriteLine(p.Muted("Scrivi /aiuto per i comandi del Demiurgo."));
 
             using var done = CancellationTokenSource.CreateLinkedTokenSource(stop);
@@ -60,7 +77,7 @@ internal static class DemiurgeConsole
                         Terminal.WriteLine(p.Muted(Help));
                         break;
                     default:
-                        if (await server.ExecuteAsync(line) is { } reply) Terminal.WriteLine(renderer.Render(reply));
+                        if (await server.ExecuteAsync(line) is { } reply) Terminal.WriteLine(p, renderer.Render(reply));
                         break;
                 }
             }

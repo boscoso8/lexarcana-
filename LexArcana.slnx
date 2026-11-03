@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/LexArcana.Core/LexArcana.Core.csproj" />
+    <Project Path="src/LexArcana.Visione/LexArcana.Visione.csproj" />
     <Project Path="src/LexArcana/LexArcana.csproj" />
   </Folder>
   <Folder Name="/tests/">

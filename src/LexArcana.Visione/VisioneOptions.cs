@@ -1,0 +1,71 @@
+using System.Globalization;
+using LexArcana.Game;
+using LexArcana.Net;
+
+namespace LexArcana.Visione;
+
+internal sealed record VisioneOptions(string Host, int Port, string Name, string? Password, string? CapturePath, float CaptureAfter, (float X, float Z, float Yaw, float Pitch)? Frame = null)
+{
+    public const string Usage = """
+        lexarcana-visione --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
+            Entra nella sessione di un Demiurgo e guarda il mondo con gli occhi del tuo personaggio.
+
+        Opzioni per provare il rendering:
+            --cattura <file.png>   salva un'immagine della finestra ed esce
+            --dopo <secondi>       quando scattare la cattura (predefinito 3)
+            --inquadra x,z,yaw,pitch   con --cattura: guarda da questo punto (metri, radianti) senza muoversi in rete
+        """;
+
+    public static bool TryParse(string[] args, out VisioneOptions options, out string error)
+    {
+        options = null!;
+        error = "";
+        string host = "127.0.0.1";
+        string? name = null, password = null, capture = null;
+        int port = GameServer.DefaultPort;
+        float after = 3f;
+        (float, float, float, float)? frame = null;
+        for (int i = 0; i < args.Length; i++)
+        {
+            var flag = args[i];
+            string? Value() => i + 1 < args.Length ? args[++i] : null;
+            switch (flag)
+            {
+                case "--host": host = Value() ?? ""; break;
+                case "--porta" or "-p":
+                    if (!int.TryParse(Value(), CultureInfo.InvariantCulture, out port) || port is < 1 or > 65535)
+                        return Fail("--porta vuole un numero tra 1 e 65535.", out error);
+                    break;
+                case "--nome" or "-n": name = Value(); break;
+                case "--parola-d-ordine": password = Value(); break;
+                case "--cattura": capture = Value(); break;
+                case "--dopo":
+                    if (!float.TryParse(Value(), CultureInfo.InvariantCulture, out after) || after is < 0 or > 600)
+                        return Fail("--dopo vuole un numero di secondi tra 0 e 600.", out error);
+                    break;
+                case "--inquadra":
+                    var parts = (Value() ?? "").Split(',');
+                    if (parts.Length != 4 || !parts.All(p => float.TryParse(p, CultureInfo.InvariantCulture, out _)))
+                        return Fail("--inquadra vuole quattro numeri: x,z,yaw,pitch", out error);
+                    var v = parts.Select(p => float.Parse(p, CultureInfo.InvariantCulture)).ToArray();
+                    frame = (v[0], v[1], v[2], v[3]);
+                    break;
+                case "-h" or "--help" or "aiuto":
+                    return Fail("", out error);
+                default:
+                    return Fail($"Opzione sconosciuta: {flag}", out error);
+            }
+        }
+        if (string.IsNullOrWhiteSpace(host)) return Fail("--host vuole un indirizzo.", out error);
+        if (!Names.IsValid(name)) return Fail($"Serve --nome: da 1 a {Names.MaxLength} lettere o cifre, senza spazi.", out error);
+        if (frame is not null && capture is null) return Fail("--inquadra si usa solo insieme a --cattura.", out error);
+        options = new(host, port, name!, password, capture, after, frame);
+        return true;
+
+        static bool Fail(string message, out string error)
+        {
+            error = message;
+            return false;
+        }
+    }
+}

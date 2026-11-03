@@ -15,7 +15,7 @@ internal sealed partial class WireContext : JsonSerializerContext;
 /// <summary>Codifica e decodifica dei messaggi, generata a compilazione (niente reflection, compatibile con AOT).</summary>
 public static class Wire
 {
-    public const int ProtocolVersion = 2;
+    public const int ProtocolVersion = 3;
 
     public static string Encode(ClientMessage message) => JsonSerializer.Serialize(message, WireContext.Default.ClientMessage);
     public static string Encode(ServerMessage message) => JsonSerializer.Serialize(message, WireContext.Default.ServerMessage);
