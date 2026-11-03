@@ -10,10 +10,16 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <OutputType>Exe</OutputType>
     <AssemblyName>red3d</AssemblyName>
+    <Version>0.1.0</Version>
     <RootNamespace>LexArcana</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- ereditati dal repository: qui li si allenta, perché è una copia da leggere e condividere -->
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Pubblicato autosufficiente, porta dentro il runtime .NET 10.0.14 (come il resto del progetto). -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true' and '$(SelfContained)' == 'true'">
+    <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
   </PropertyGroup>
 
   <ItemGroup>
