@@ -6,7 +6,7 @@ using LexArcana.Net;
 
 namespace LexArcana.App;
 
-internal enum Mode { Help, Server, Client, Character, Campaign }
+internal enum Mode { Help, Version, Server, Client, Character, Campaign }
 
 /// <summary>Le opzioni della riga di comando, per tutte le modalità.</summary>
 internal sealed record Options
@@ -26,20 +26,31 @@ internal sealed record Options
     public int? Seed { get; init; }
     public int Adventures { get; init; } = 4;
     public string? Folder { get; init; }
+    /// <summary>server: la porta web (WebSocket su /ws e, con WebRoot, il client web per browser e iPhone).</summary>
+    public int? WebPort { get; init; }
+    public string? WebRoot { get; init; }
+    /// <summary>server: la parola d'ordine con cui si conduce da remoto, collegandosi con il nome Demiurgo.</summary>
+    public string? DemiurgePassword { get; init; }
 
     public const string Usage = """
         lexarcana server [--porta 7777] [--indirizzo 0.0.0.0] [--parola-d-ordine <testo>]
-                         [--campagna <campagna.json> [--avventura 1] | --mappa <file>] [--senza-colori]
+                         [--campagna <campagna.json> [--avventura 1] | --mappa <file>]
+                         [--porta-web 8080 [--web <cartella del client web>]] [--parola-demiurgo <testo>] [--senza-colori]
             Apre una sessione: tu sei il Demiurgo e conduci la partita da questo terminale.
             Con --campagna il gruppo parte dall'avventura scelta; /avventura <n> lo porta alla successiva.
+            Con --porta-web i giocatori entrano anche dal browser, iPhone compreso: http://<indirizzo>:8080
+            Con --parola-demiurgo si conduce anche da remoto: lexarcana client --nome Demiurgo --parola-d-ordine <quella>
 
         lexarcana client --nome <nome> | --personaggio <file.json>
-                         [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>] [--senza-colori]
+                         [--host 127.0.0.1 | --host https://tavolo.esempio.it] [--porta 7777] [--parola-d-ordine <testo>] [--senza-colori]
             Ti collega alla sessione di un Demiurgo come giocatore (solo testo).
             Con --personaggio la tua scheda viene compilata da sola.
 
         lexarcana personaggio --nome <nome> [--file <nome>.json] [--casuale [--seme <numero>]]
             Crea un personaggio passo per passo (o a caso con --casuale) e lo salva in un file.
+
+        lexarcana --versione
+            Mostra la versione del gioco e del runtime .NET che contiene.
 
         lexarcana campagna [--seme <numero>] [--avventure 4] [--cartella campagne]
             Genera una campagna: il manuale del Demiurgo (campagna.md), il file per il server
@@ -53,6 +64,11 @@ internal sealed record Options
         options = new() { Mode = Mode.Help };
         error = "";
         if (args is [] or ["-h" or "--help" or "aiuto", ..]) return true;
+        if (args is ["--versione" or "versione" or "--version", ..])
+        {
+            options = new() { Mode = Mode.Version };
+            return true;
+        }
 
         Mode mode = args[0].ToLowerInvariant() switch
         {
@@ -123,6 +139,19 @@ internal sealed record Options
                     o = o with { Folder = Value() };
                     if (string.IsNullOrWhiteSpace(o.Folder)) return Fail("--cartella vuole un percorso.", out error);
                     break;
+                case "--porta-web" when mode == Mode.Server:
+                    if (!Int(out var webPort, 0, 65535)) return Fail("--porta-web vuole un numero tra 0 e 65535.", out error);
+                    o = o with { WebPort = webPort };
+                    break;
+                case "--web" when mode == Mode.Server:
+                    o = o with { WebRoot = Value() };
+                    if (string.IsNullOrWhiteSpace(o.WebRoot) || !Directory.Exists(o.WebRoot)) return Fail("--web vuole la cartella del client web (quella con index.html).", out error);
+                    break;
+                case "--parola-demiurgo" when mode == Mode.Server:
+                    var dp = Value();
+                    if (string.IsNullOrEmpty(dp)) return Fail("--parola-demiurgo vuole un testo.", out error);
+                    o = o with { DemiurgePassword = dp };
+                    break;
                 case "--senza-colori":
                     o = o with { Color = false };
                     break;
@@ -131,8 +160,12 @@ internal sealed record Options
             }
         }
 
+        if (o.WebRoot is not null && o.WebPort is null) o = o with { WebPort = 8080 };
+        // nei pacchetti il client web sta nella cartella "web" accanto all'eseguibile: lo si usa da solo
+        if (o.WebPort is not null && o.WebRoot is null && Directory.Exists(Path.Combine(AppContext.BaseDirectory, "web")))
+            o = o with { WebRoot = Path.Combine(AppContext.BaseDirectory, "web") };
         if (o.MapFile is not null && o.CampaignFile is not null) return Fail("Usa --campagna oppure --mappa, non entrambe.", out error);
-        if (mode == Mode.Client && o.CharacterFile is null && !Names.IsValid(o.Name))
+        if (mode == Mode.Client && o.CharacterFile is null && !Names.IsValid(o.Name) && !Names.IsDemiurge(o.Name))
             return Fail($"Il client vuole --nome (da 1 a {Names.MaxLength} lettere o cifre, senza spazi) oppure --personaggio <file>.", out error);
         if (mode == Mode.Character && !Names.IsValid(o.Name))
             return Fail($"Serve --nome: il nome con cui entri in sessione, da 1 a {Names.MaxLength} lettere o cifre.", out error);

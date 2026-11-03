@@ -7,5 +7,15 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <!--
+    Negli eseguibili autosufficienti (pubblicati con un RID e l'opzione self-contained) il runtime .NET viaggia dentro
+    l'eseguibile: qui si fissa quale. 10.0.14 è l'ultimo aggiornamento di .NET 10 (25 ottobre 2026, con
+    correzioni di sicurezza). Le build normali e i test usano il runtime installato, come sempre.
+  -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true' and '$(SelfContained)' == 'true'">
+    <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
   </PropertyGroup>
 </Project>

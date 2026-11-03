@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0c0a08">
+<title>Lex Arcana</title>
+<style>
+  @font-face { font-family: "Cinzel"; src: url("fonts/Cinzel.ttf") format("truetype"); font-weight: 400 900; }
+  @font-face { font-family: "EB Garamond"; src: url("fonts/EBGaramond.ttf") format("truetype"); font-weight: 400 800; }
+  :root {
+    --vellum: #211c18; --vellum-deep: #302822; --ink: #eee4d2; --ink-muted: #b8a892; --pompeian: #e8806a;
+    --on-pompeian: #1a1512; --gilt: #c4a058; --basalt: #0c0a08; --basalt-edge: #57493d; --rule: #57493d;
+  }
+  html, body { margin: 0; height: 100%; background: var(--basalt); color: var(--ink); font-family: "EB Garamond", Garamond, Georgia, serif; }
+  body { overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: none; touch-action: none; outline: none; }
+  #ingresso { min-height: 100%; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px 24px; box-sizing: border-box; }
+  .card { width: min(420px, 100%); background: var(--vellum); border: 1px solid var(--basalt-edge); padding: 28px 24px; box-sizing: border-box; }
+  h1 { font-family: "Cinzel", Georgia, serif; font-weight: 600; letter-spacing: .04em; color: var(--ink); margin: 0 0 4px; font-size: 40px; line-height: 44px; }
+  .tag { font-style: italic; color: var(--ink-muted); margin: 0 0 24px; font-size: 17px; }
+  label { display: block; font-family: "Cinzel", Georgia, serif; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; margin: 16px 0 6px; color: var(--ink); }
+  input, select { width: 100%; box-sizing: border-box; height: 44px; font: inherit; font-size: 18px; padding: 0 12px; color: var(--ink);
+    background: var(--basalt); border: 1px solid var(--ink-muted); border-radius: 0; -webkit-appearance: none; appearance: none; }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--gilt); outline-offset: 2px; }
+  .hint { font-size: 15px; color: var(--ink-muted); font-style: italic; margin: 6px 0 0; }
+  button { margin-top: 24px; width: 100%; height: 48px; border: 1px solid var(--pompeian); background: var(--pompeian); color: var(--on-pompeian);
+    font-family: "Cinzel", Georgia, serif; font-weight: 600; letter-spacing: .12em; font-size: 14px; border-radius: 2px; }
+  button:disabled { background: transparent; color: var(--ink-muted); border-color: var(--rule); }
+  #stato { min-height: 22px; margin: 14px 0 0; color: var(--pompeian); }
+  .ruota { color: var(--ink-muted); font-size: 15px; margin-top: 18px; text-align: center; font-style: italic; }
+  @media (orientation: portrait) and (pointer: coarse) { .ruota::before { content: "Per giocare gira il telefono in orizzontale. "; } }
+</style>
+</head>
+<body>
+<main id="ingresso">
+  <form class="card" id="modulo" autocomplete="off">
+    <h1>Lex Arcana</h1>
+    <p class="tag">Entra nella sessione del Demiurgo.</p>
+    <label for="nome">Nome</label>
+    <input id="nome" name="nome" required maxlength="24" pattern="[A-Za-z0-9_\-À-ÿ]{1,24}" placeholder="Aurelia" autocapitalize="words" spellcheck="false">
+    <p class="hint" id="salvato">Lettere o cifre, senza spazi.</p>
+    <label for="vocazione">Vocazione</label>
+    <select id="vocazione" name="vocazione">
+      <option value="">a sorte</option>
+      <option>Legionario</option><option>Augure</option><option>Medico</option><option>Esploratore</option>
+      <option>Mercante</option><option>Gladiatore</option><option>Erudito</option>
+    </select>
+    <label for="parola">Parola d'ordine</label>
+    <input id="parola" name="parola" type="password" placeholder="se il Demiurgo ne ha messa una">
+    <button id="entra" type="submit" disabled>Caricamento…</button>
+    <p id="stato" role="status"></p>
+    <p class="ruota">Pollice sinistro per camminare, trascina a destra per guardare.</p>
+  </form>
+</main>
+<canvas id="canvas" tabindex="0"></canvas>
+<script type="module" src="main.js"></script>
+</body>
+</html>

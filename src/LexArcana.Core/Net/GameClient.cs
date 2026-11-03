@@ -10,9 +10,9 @@ namespace LexArcana.Net;
 public sealed class GameClient : IAsyncDisposable
 {
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(15);
-    private readonly LineConnection _connection;
+    private readonly IConnection _connection;
 
-    private GameClient(LineConnection connection, Welcome welcome)
+    private GameClient(IConnection connection, Welcome welcome)
     {
         _connection = connection;
         Welcome = welcome;
@@ -21,17 +21,63 @@ public sealed class GameClient : IAsyncDisposable
     public Welcome Welcome { get; }
     public string Name => Welcome.Name;
 
-    /// <summary>Si collega e si presenta. Se il server rifiuta, lancia <see cref="ConnectionRefusedException"/> con il motivo.</summary>
+    /// <summary>Si collega via TCP e si presenta. Se il server rifiuta, lancia <see cref="ConnectionRefusedException"/> con il motivo.</summary>
     public static async Task<GameClient> ConnectAsync(string host, int port, string name, string? password = null, CancellationToken ct = default)
     {
         var tcp = new TcpClient();
-        LineConnection? connection = null;
         try
         {
             await tcp.ConnectAsync(host, port, ct);
-            connection = new LineConnection(tcp);
-            connection.Post(Wire.Encode(new Hello(name, string.IsNullOrEmpty(password) ? null : password)));
+        }
+        catch
+        {
+            tcp.Dispose();
+            throw;
+        }
+        return await HelloAsync(new LineConnection(tcp), name, password, ct);
+    }
 
+    /// <summary>
+    /// Si collega via WebSocket (es. <c>ws://host:8080/ws</c>) e si presenta: è la strada dei browser, iPhone compreso.
+    /// </summary>
+    public static async Task<GameClient> ConnectWebSocketAsync(Uri uri, string name, string? password = null, CancellationToken ct = default)
+    {
+        var socket = new System.Net.WebSockets.ClientWebSocket();
+        try
+        {
+            await socket.ConnectAsync(uri, ct);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+        return await HelloAsync(new WebSocketConnection(socket, uri.ToString()), name, password, ct);
+    }
+
+    /// <summary>
+    /// Si collega a un tavolo: con un indirizzo web (<c>https://tavolo.esempio.it</c>, <c>wss://…/ws</c>, <c>http://…</c>)
+    /// via WebSocket, come i browser; con un nome o un indirizzo IP via TCP sulla porta indicata.
+    /// </summary>
+    public static Task<GameClient> ConnectToAsync(string host, int port, string name, string? password = null, CancellationToken ct = default) =>
+        WebSocketUri(host) is { } uri ? ConnectWebSocketAsync(uri, name, password, ct) : ConnectAsync(host, port, name, password, ct);
+
+    /// <summary>L'indirizzo WebSocket di un tavolo online, o null se <paramref name="host"/> non è un indirizzo web.</summary>
+    public static Uri? WebSocketUri(string host)
+    {
+        if (!Uri.TryCreate(host, UriKind.Absolute, out var uri)) return null;
+        string? scheme = uri.Scheme switch { "https" or "wss" => "wss", "http" or "ws" => "ws", _ => null };
+        if (scheme is null) return null;
+        var builder = new UriBuilder(uri) { Scheme = scheme, Port = uri.IsDefaultPort ? -1 : uri.Port };
+        if (builder.Path is "" or "/") builder.Path = "/ws";
+        return builder.Uri;
+    }
+
+    private static async Task<GameClient> HelloAsync(IConnection connection, string name, string? password, CancellationToken ct)
+    {
+        try
+        {
+            connection.Post(Wire.Encode(new Hello(name, string.IsNullOrEmpty(password) ? null : password)));
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(HelloTimeout);
             var reply = await connection.ReadLineAsync(timeout.Token) is { } line
@@ -46,8 +92,7 @@ public sealed class GameClient : IAsyncDisposable
         }
         catch
         {
-            if (connection is not null) await connection.DisposeAsync();
-            tcp.Dispose();
+            await connection.DisposeAsync();
             throw;
         }
     }
@@ -65,7 +110,7 @@ public sealed class GameClient : IAsyncDisposable
         {
             string? line;
             try { line = await _connection.ReadLineAsync(ct); }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException) { yield break; }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException or System.Net.WebSockets.WebSocketException) { yield break; }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { yield break; } // chiusa da noi
             if (line is null) yield break;
             yield return Wire.DecodeServer(line);

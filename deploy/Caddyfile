@@ -1,0 +1,5 @@
+# Caddy ottiene e rinnova da solo il certificato HTTPS per il dominio, e inoltra pagine e WebSocket al tavolo.
+{$DOMINIO} {
+	encode zstd gzip
+	reverse_proxy lexarcana:8080
+}

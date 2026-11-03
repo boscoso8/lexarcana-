@@ -41,7 +41,26 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
     private bool _showHelp = true, _helpPinned, _mouseCaptured = true, _quit;
     private string? _overlay;
 
+    private Lighting? _lighting;
+    private Hud? _hud;
+    private double _start;
+    private bool _captured;
+    private readonly (Vector3, Vector3, float)[] _lights = new (Vector3, Vector3, float)[Lighting.MaxLights];
+    private readonly CancellationTokenSource _network = new();
+    private Task? _receiving;
+    private TouchControls? _touch;
+
+    /// <summary>Sul desktop: apre la finestra, gira finché la si chiude, poi libera tutto.</summary>
     public int Run()
+    {
+        Start(1280, 720);
+        while (Frame()) { }
+        Stop();
+        return 0;
+    }
+
+    /// <summary>Prepara la scena e apre la finestra (nel browser: il canvas della pagina).</summary>
+    public void Start(int width, int height)
     {
         var welcome = client.Welcome;
         _present.AddRange(welcome.Players);
@@ -58,98 +77,113 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         }
         _lastSent = _pose;
 
-        using var network = new CancellationTokenSource();
-        var receiving = Task.Run(() => ReceiveAsync(network.Token));
+        _receiving = Task.Run(() => ReceiveAsync(_network.Token));
         if (options.Character is { } character)
             client.Send(new Embody(character));
 
-        Raylib.SetConfigFlags(ConfigFlags.Msaa4xHint | ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint);
-        Raylib.InitWindow(1280, 720, $"Lex Arcana · {client.Name}");
+        bool browser = OperatingSystem.IsBrowser();
+        Raylib.SetConfigFlags(browser ? ConfigFlags.Msaa4xHint : ConfigFlags.Msaa4xHint | ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint);
+        Raylib.InitWindow(width, height, $"Lex Arcana · {client.Name}");
         Raylib.SetExitKey(KeyboardKey.Null);
-        Raylib.SetTargetFPS(60);
-        Raylib.DisableCursor();
+        if (!browser) Raylib.SetTargetFPS(60); // nel browser il ritmo lo dà requestAnimationFrame
+        if (options.Touch) { _touch = new TouchControls(options.TouchPoints); _mouseCaptured = false; }
+        else Raylib.DisableCursor();
 
-        var assets = Path.Combine(AppContext.BaseDirectory, "Assets");
-        using (var lighting = new Lighting())
-        using (var hud = new Hud(assets))
+        _lighting = new Lighting();
+        _hud = new Hud(Path.Combine(AppContext.BaseDirectory, "Assets")) { Compact = options.Touch };
+        _world = new World(_map, _lighting);
+        _start = Raylib.GetTime();
+        _hud.Add(_renderer.Render(welcome)!, 0);
+    }
+
+    /// <summary>Un fotogramma: rete, comandi, simulazione locale e disegno. False quando si deve chiudere.</summary>
+    public bool Frame()
+    {
+        if (_quit || (!OperatingSystem.IsBrowser() && Raylib.WindowShouldClose())) return false;
+        var hud = _hud!;
+        var lighting = _lighting!;
+        var lights = _lights;
+        bool captured = _captured;
+        double now = Raylib.GetTime() - _start;
+        float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
+
+        Drain(hud, lighting, now);
+        var world = _world!;
+        HandleInput(hud, dt, now);
+        foreach (var avatar in _avatars.Values) avatar.Update(dt);
+        foreach (var enemy in _enemies.Values) enemy.Update(dt);
+        foreach (var gone in _enemies.Values.Where(e => e.DiedAt is { } d && now - d > 1.3).Select(e => e.Id).ToList()) _enemies.Remove(gone);
+        _floating.RemoveAll(f => now - f.Time > 1.4);
+        _shots.RemoveAll(s => now - s.Time > 0.2);
+        if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
+        SendPose(now);
+
+        var forward = new Vector3(MathF.Sin(_pose.Yaw) * MathF.Cos(_pitch), MathF.Sin(_pitch), MathF.Cos(_pose.Yaw) * MathF.Cos(_pitch));
+        var eye = new Vector3(_pose.X, EyeHeight, _pose.Z);
+        var camera = new Camera3D(eye, eye + forward, Vector3.UnitY, 70f, CameraProjection.Perspective);
+        _aimed = Aim(eye, forward);
+        if (_overlay is null && !hud.Typing && _vitals?.Down != true) HandleAttack(eye, forward, now);
+
+        int count = 0;
+        lights[count++] = (eye + new Vector3(0, -0.2f, 0) + forward * 0.3f, new Vector3(0.62f, 0.5f, 0.36f), 9f); // lanterna
+        foreach (var fire in world.Fires(now).Take(Lighting.MaxLights - 1)) lights[count++] = fire;
+        lighting.Frame(eye, lights.AsSpan(0, count));
+
+        Raylib.BeginDrawing();
+        Raylib.ClearBackground(Theme.Night);
+        Raylib.BeginMode3D(camera);
+        world.Draw(eye, now);
+        foreach (var avatar in _avatars.Values) world.DrawAvatar(avatar);
+        foreach (var enemy in _enemies.Values) world.DrawEnemy(enemy, now);
+        foreach (var shot in _shots) world.DrawShot(shot, now);
+        if (_vitals?.Down != true)
         {
-            _world = new World(_map, lighting);
-            var start = Raylib.GetTime();
-            hud.Add(_renderer.Render(welcome)!, 0);
-            bool captured = false;
-            var lights = new (Vector3, Vector3, float)[Lighting.MaxLights];
-
-            while (!_quit && !Raylib.WindowShouldClose())
-            {
-                double now = Raylib.GetTime() - start;
-                float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
-
-                Drain(hud, lighting, now);
-                var world = _world!;
-                HandleInput(hud, dt, now);
-                foreach (var avatar in _avatars.Values) avatar.Update(dt);
-                foreach (var enemy in _enemies.Values) enemy.Update(dt);
-                foreach (var gone in _enemies.Values.Where(e => e.DiedAt is { } d && now - d > 1.3).Select(e => e.Id).ToList()) _enemies.Remove(gone);
-                _floating.RemoveAll(f => now - f.Time > 1.4);
-                _shots.RemoveAll(s => now - s.Time > 0.2);
-                if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
-                SendPose(now);
-
-                var forward = new Vector3(MathF.Sin(_pose.Yaw) * MathF.Cos(_pitch), MathF.Sin(_pitch), MathF.Cos(_pose.Yaw) * MathF.Cos(_pitch));
-                var eye = new Vector3(_pose.X, EyeHeight, _pose.Z);
-                var camera = new Camera3D(eye, eye + forward, Vector3.UnitY, 70f, CameraProjection.Perspective);
-                _aimed = Aim(eye, forward);
-                if (_overlay is null && !hud.Typing && _vitals?.Down != true) HandleAttack(eye, forward, now);
-
-                int count = 0;
-                lights[count++] = (eye + new Vector3(0, -0.2f, 0) + forward * 0.3f, new Vector3(0.62f, 0.5f, 0.36f), 9f); // lanterna
-                foreach (var fire in world.Fires(now).Take(Lighting.MaxLights - 1)) lights[count++] = fire;
-                lighting.Frame(eye, lights.AsSpan(0, count));
-
-                Raylib.BeginDrawing();
-                Raylib.ClearBackground(Theme.Night);
-                Raylib.BeginMode3D(camera);
-                world.Draw(eye, now);
-                foreach (var avatar in _avatars.Values) world.DrawAvatar(avatar);
-                foreach (var enemy in _enemies.Values) world.DrawEnemy(enemy, now);
-                foreach (var shot in _shots) world.DrawShot(shot, now);
-                if (_vitals?.Down != true)
-                {
-                    float swing = (float)Math.Clamp((now - _swingAt) / SwingTime, 0, 1);
-                    world.DrawWeapon(eye, _pose.Yaw, _pitch, swing >= 1 ? 0 : swing, (float)now * 1.7f);
-                }
-                Raylib.EndMode3D();
-
-                DrawEnemyTags(hud, camera, eye, forward);
-                foreach (var f in _floating) hud.DrawFloating(f, Raylib.GetWorldToScreen(f.Position, camera), now);
-                if (now - _hurtAt < 0.5) Hud.DrawHurt((float)(1 - (now - _hurtAt) / 0.5));
-                if (_vitals is { } myVitals) hud.DrawVitals(myVitals);
-
-                DrawNameTags(hud, camera, eye, forward);
-                hud.DrawPlaceName(_map.Name);
-                if (_showSheet || Raylib.IsKeyDown(KeyboardKey.C) && !hud.Typing) hud.DrawSheet(_mySheet, options.Character);
-                if (_overlay is null && !hud.Typing && !_showHelp) Hud.DrawCrosshair();
-                if (_vitals?.Down == true && _overlay is null) hud.DrawDown(CombatRespawnDelay - (now - _downSince));
-                hud.Draw(now, _showHelp, _present, _overlay);
-                Raylib.EndDrawing();
-
-                if (options.CapturePath is { } path && !captured && now >= options.CaptureAfter)
-                {
-                    var image = Raylib.LoadImageFromScreen();
-                    Raylib.ExportImage(image, path);
-                    Raylib.UnloadImage(image);
-                    captured = true;
-                    _quit = true;
-                }
-            }
-            Dispose(); // la scena va liberata finché la finestra e il contesto OpenGL esistono
+            float swing = (float)Math.Clamp((now - _swingAt) / SwingTime, 0, 1);
+            world.DrawWeapon(eye, _pose.Yaw, _pitch, swing >= 1 ? 0 : swing, (float)now * 1.7f);
         }
+        Raylib.EndMode3D();
 
+        DrawEnemyTags(hud, camera, eye, forward);
+        foreach (var f in _floating) hud.DrawFloating(f, Raylib.GetWorldToScreen(f.Position, camera), now);
+        if (now - _hurtAt < 0.5) Hud.DrawHurt((float)(1 - (now - _hurtAt) / 0.5));
+        if (_vitals is { } myVitals) hud.DrawVitals(myVitals);
+
+        DrawNameTags(hud, camera, eye, forward);
+        hud.DrawPlaceName(_map.Name);
+        if (_showSheet || Raylib.IsKeyDown(KeyboardKey.C) && !hud.Typing) hud.DrawSheet(_mySheet, options.Character);
+        if (_overlay is null && !hud.Typing && !_showHelp) Hud.DrawCrosshair();
+        if (_vitals?.Down == true && _overlay is null) hud.DrawDown(CombatRespawnDelay - (now - _downSince));
+        if (_touch is { } controls && _overlay is null)
+        {
+            controls.Draw();
+            TouchControls.DrawButtons(hud);
+        }
+        hud.Draw(now, _showHelp, _present, _overlay);
+        Raylib.EndDrawing();
+
+        if (options.CapturePath is { } path && !captured && now >= options.CaptureAfter)
+        {
+            var image = Raylib.LoadImageFromScreen();
+            Raylib.ExportImage(image, path);
+            Raylib.UnloadImage(image);
+            captured = true;
+            _quit = true;
+        }
+        _captured = captured;
+        return !_quit;
+    }
+
+    /// <summary>Libera la scena e chiude la finestra.</summary>
+    public void Stop()
+    {
+        Dispose(); // la scena va liberata finché la finestra e il contesto OpenGL esistono
+        _hud?.Dispose();
+        _lighting?.Dispose();
         Raylib.CloseWindow();
         SaveExperience();
-        network.Cancel();
-        try { receiving.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { }
-        return 0;
+        _network.Cancel();
+        if (!OperatingSystem.IsBrowser())
+            try { _receiving?.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { }
     }
 
     public void Dispose()
@@ -207,6 +241,8 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
                     break;
                 case Vitals v when v.Name.IsSameName(client.Name):
                     if (v.Down && _vitals?.Down != true) _downSince = now;
+                    if (options.SaveCharacter is { } save && options.Character is { } me && v.Experience > me.Experience && v.Experience != _vitals?.Experience)
+                        save(me with { Experience = v.Experience });
                     _vitals = v;
                     continue;
                 case SheetShown sheet when sheet.Owner.IsSameName(client.Name):
@@ -279,6 +315,12 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         if (options.AutoFight)
         {
             AutoFight(dt);
+            return;
+        }
+
+        if (_touch is { } touch)
+        {
+            TouchInput(touch, hud, dt, now);
             return;
         }
 
@@ -366,16 +408,72 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
     }
 
     private bool _autoAttack, _autoRanged;
+    private bool _touchMelee, _touchRanged;
+
+    /// <summary>Camminare con il joystick, guardare trascinando, pulsanti per colpire, tirare, parlare e la scheda.</summary>
+    private void TouchInput(TouchControls touch, Hud hud, float dt, double now)
+    {
+        touch.Update();
+        const float LookSpeed = 0.0065f;
+        float yaw = _pose.Yaw - touch.Look.X * LookSpeed;
+        _pitch = Math.Clamp(_pitch - touch.Look.Y * LookSpeed, -1.2f, 1.2f);
+        var forward = new Vector2(MathF.Sin(yaw), MathF.Cos(yaw));
+        var right = new Vector2(-forward.Y, forward.X);
+        var move = forward * touch.Move.Y + right * touch.Move.X;
+        float strength = MathF.Min(1f, move.Length());
+        if (strength > 0.05f) move = Vector2.Normalize(move) * (strength > 0.85f ? RunSpeed : WalkSpeed) * strength * dt;
+        else move = Vector2.Zero;
+        _pose = _map.Slide(_pose, move.X, move.Y, yaw);
+
+        if (touch.Pressed.Contains(TouchControls.Button.Melee)) _touchMelee = true;
+        if (touch.Pressed.Contains(TouchControls.Button.Ranged)) _touchRanged = true;
+        if (touch.Pressed.Contains(TouchControls.Button.Sheet)) _showSheet = !_showSheet;
+        if (touch.Pressed.Contains(TouchControls.Button.Talk) && options.AskText is { } ask && ask() is { Length: > 0 } line)
+            Submit(hud, line, now);
+        if (touch.Pressed.Count > 0) _showHelp = false;
+    }
+
+    private int? AssistAim(Vector3 eye, Vector3 forward, float reach)
+    {
+        var flat = Vector2.Normalize(new Vector2(forward.X, forward.Z));
+        return _enemies.Values
+            .Where(e => e.DiedAt is null)
+            .Select(e => (e, to: e.Position - new Vector2(eye.X, eye.Z)))
+            .Where(x => x.to.Length() <= reach && x.to.Length() > 0.01f
+                        && Vector2.Dot(Vector2.Normalize(x.to), flat) > MathF.Cos(0.9f)
+                        && _map.HasLineOfSight(eye.X, eye.Z, x.e.Position.X, x.e.Position.Y))
+            .OrderBy(x => x.to.Length())
+            .Select(x => (int?)x.e.Id)
+            .FirstOrDefault();
+    }
 
     private void HandleAttack(Vector3 eye, Vector3 forward, double now)
     {
-        if (!(_mouseCaptured || options.AutoFight) || now < _nextAttackAt) return;
-        bool melee = Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.F) || (_autoAttack && !_autoRanged);
-        bool ranged = Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.R) || (_autoAttack && _autoRanged);
+        bool touchMelee = _touchMelee, touchRanged = _touchRanged;
+        _touchMelee = _touchRanged = false;
+        if (!(_mouseCaptured || options.AutoFight || _touch is not null) || now < _nextAttackAt) return;
+        bool mouse = _touch is null;
+        bool melee = mouse && (Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.F)) || (_autoAttack && !_autoRanged) || touchMelee;
+        bool ranged = mouse && (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.R)) || (_autoAttack && _autoRanged) || touchRanged;
         _autoAttack = false;
         if (!melee && !ranged) return;
         _nextAttackAt = now + LocalCooldown;
         if (melee) _swingAt = now;
+        // Con il pollice mirare è difficile: sugli schermi touch, se il mirino è vuoto, si colpisce il nemico
+        // visibile più vicino davanti a sé (entro la portata del colpo scelto).
+        if (_aimed is null && _touch is not null) _aimed = AssistAim(eye, forward, ranged ? LexArcana.Combat.Fighter.RangedReach : LexArcana.Combat.Fighter.MeleeReach + 0.5f);
+        // e in mischia, se chi ti colpisce è alle spalle, ti giri verso di lui
+        if (_aimed is null && _touch is not null && melee)
+        {
+            var me = new Vector2(eye.X, eye.Z);
+            if (_enemies.Values.Where(e => e.DiedAt is null && Vector2.Distance(e.Position, me) <= LexArcana.Combat.Fighter.MeleeReach + 0.3f)
+                    .OrderBy(e => Vector2.Distance(e.Position, me)).FirstOrDefault() is { } behind)
+            {
+                var to = behind.Position - me;
+                _pose = _pose with { Yaw = MathF.Atan2(to.X, to.Y) };
+                _aimed = behind.Id;
+            }
+        }
         if (_aimed is { } id && _enemies.TryGetValue(id, out var target))
         {
             if (ranged) _shots.Add(new Shot(eye + forward * 0.5f - Vector3.UnitY * 0.15f, new Vector3(target.Position.X, target.Height * 0.55f, target.Position.Y), now));

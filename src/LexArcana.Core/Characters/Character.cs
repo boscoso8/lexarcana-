@@ -98,10 +98,14 @@ public sealed record Character
     }
 
     /// <summary>Un personaggio casuale ma valido. Con lo stesso seme esce sempre lo stesso.</summary>
-    public static Character Random(string player, int seed)
+    public static Character Random(string player, int seed) => Random(player, seed, null);
+
+    /// <summary>Come <see cref="Random(string, int)"/>, ma con la vocazione scelta (se esiste).</summary>
+    public static Character Random(string player, int seed, string? vocationName)
     {
         var random = new Random(seed);
         var vocation = Rules.Vocations[random.Next(Rules.Vocations.Count)];
+        if (vocationName is not null && Rules.FindVocation(vocationName) is { } chosen) vocation = chosen;
         var origin = Rules.Origins[random.Next(Rules.Origins.Count)];
 
         // Più punti dove la vocazione ne ha bisogno, il resto a caso.

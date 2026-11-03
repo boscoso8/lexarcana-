@@ -1,0 +1,31 @@
+# Il tavolo online: docker compose up -d   (dalla cartella deploy, con il file .env compilato)
+services:
+  lexarcana:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: lexarcana:0.1.0
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./dati:/dati
+    # stdin aperto: con "docker attach" si può condurre anche dalla console del server
+    stdin_open: true
+    tty: true
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-dati:/data
+    depends_on:
+      - lexarcana
+
+volumes:
+  caddy-dati:

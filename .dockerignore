@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+.git/
+Red3D/
+docs/
+campagne/
+deploy/dati/
+deploy/.env

@@ -66,7 +66,7 @@ internal static class DemiurgeConsole
             }
             campaign = loaded;
         }
-        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map, campaign: campaign);
+        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map, campaign: campaign, demiurgePassword: options.DemiurgePassword);
         try
         {
             server.Start();
@@ -86,6 +86,20 @@ internal static class DemiurgeConsole
             Terminal.WriteLine(p.Muted("I giocatori si collegano con: ") +
                 p.Ink($"lexarcana client --host <indirizzo> --porta {server.Port} --nome <nome>") +
                 p.Muted(" (testo) oppure lexarcana-visione con gli stessi argomenti (3D)"));
+            if (options.WebPort is { } webPort)
+            {
+                try
+                {
+                    int actual = server.StartWeb(address, webPort, options.WebRoot);
+                    Terminal.WriteLine(p.Muted($"Porta web {actual}: ") + p.Ink($"http://<indirizzo>:{actual}") +
+                        p.Muted(options.WebRoot is null ? " (solo WebSocket su /ws: avvia con --web <cartella> per servire il client)" : " · dal browser, anche da iPhone"));
+                }
+                catch (SocketException ex)
+                {
+                    await Console.Error.WriteLineAsync(p.Pompeian($"Impossibile aprire la porta web {webPort}: {ex.Message}"));
+                    return 1;
+                }
+            }
             Terminal.WriteLine(p.Muted("Scrivi /aiuto per i comandi del Demiurgo."));
             if (campaign is not null)
             {

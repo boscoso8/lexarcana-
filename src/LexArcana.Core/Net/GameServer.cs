@@ -17,7 +17,7 @@ namespace LexArcana.Net;
 /// Il Demiurgo non è un client: vede ogni messaggio tramite <c>demiurgeView</c>, compresi
 /// sussurri e tiri segreti, e agisce con <see cref="ExecuteAsync"/>.
 /// </summary>
-public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null, Campaign? campaign = null, bool peaceful = false)
+public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null, Campaign? campaign = null, bool peaceful = false, string? demiurgePassword = null)
     : IAsyncDisposable
 {
     public const int DefaultPort = 7777;
@@ -29,6 +29,22 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     private readonly TcpListener _listener = new(address, port);
     private readonly Dice _dice = dice ?? new Dice();
     private readonly byte[]? _password = string.IsNullOrEmpty(password) ? null : Encoding.UTF8.GetBytes(password);
+    private readonly byte[]? _demiurgePassword = string.IsNullOrEmpty(demiurgePassword) ? null : Encoding.UTF8.GetBytes(demiurgePassword);
+
+    /// <summary>
+    /// Chi conduce da remoto (es. un tavolo online, dove nessuno siede davanti alla console del server):
+    /// riceve tutto ciò che vede la console e può dare i comandi del Demiurgo.
+    /// </summary>
+    private readonly ConcurrentDictionary<IConnection, byte> _remoteDemiurges = new();
+
+    /// <summary>Ciò che vede il Demiurgo: la console del server e chi conduce da remoto.</summary>
+    private void View(ServerMessage message)
+    {
+        demiurgeView(message);
+        if (_remoteDemiurges.IsEmpty) return;
+        var line = Wire.Encode(message);
+        foreach (var remote in _remoteDemiurges.Keys) remote.Post(line);
+    }
     private readonly ConcurrentDictionary<string, Player> _players = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CharacterSheet> _sheets = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Pose> _poses = new(StringComparer.OrdinalIgnoreCase);
@@ -49,7 +65,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     private readonly CancellationTokenSource _stopping = new();
     private Task? _acceptLoop;
 
-    private sealed record Player(string Name, LineConnection Connection)
+    private sealed record Player(string Name, IConnection Connection)
     {
         /// <summary>
         /// Diventa true appena il benvenuto è in coda: da lì in poi riceve anche i messaggi diffusi a tutti.
@@ -119,6 +135,33 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     }
 
     public Pose? PoseOf(string name) => _poses.TryGetValue(name, out var pose) ? pose : null;
+
+    private void Track(Task session)
+    {
+        _sessions.TryAdd(session, 0);
+        _ = session.ContinueWith(t => _sessions.TryRemove(t, out _), TaskScheduler.Default);
+    }
+
+    private WebGateway? _web;
+    private Task? _webLoop;
+
+    /// <summary>
+    /// Apre anche la porta web: WebSocket su /ws per i giocatori nel browser (iPhone compreso) e,
+    /// se c'è <paramref name="webRoot"/>, i file del client web. Va chiamato dopo <see cref="Start"/>.
+    /// </summary>
+    public int StartWeb(IPAddress webAddress, int webPort, string? webRoot)
+    {
+        _web = new WebGateway(webAddress, webPort, (connection, ct) =>
+        {
+            var session = RunSessionAsync(connection, ct);
+            Track(session);
+            return session;
+        }, webRoot);
+        _webLoop = _web.StartAsync(_stopping.Token);
+        return _web.Port;
+    }
+
+    public int? WebPort => _web?.Port;
 
     public void Start()
     {
@@ -216,13 +259,11 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException) { break; }
             catch (SocketException) { continue; }
 
-            var session = RunSessionAsync(new LineConnection(tcp), ct);
-            _sessions.TryAdd(session, 0);
-            _ = session.ContinueWith(t => _sessions.TryRemove(t, out _), TaskScheduler.Default);
+            Track(RunSessionAsync(new LineConnection(tcp), ct));
         }
     }
 
-    private async Task RunSessionAsync(LineConnection connection, CancellationToken ct)
+    private async Task RunSessionAsync(IConnection connection, CancellationToken ct)
     {
         Player? player = null;
         try
@@ -258,19 +299,29 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         }
     }
 
-    private async Task<Player?> HandshakeAsync(LineConnection connection, CancellationToken ct)
+    private async Task<Player?> HandshakeAsync(IConnection connection, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(HelloTimeout);
         if (await connection.ReadLineAsync(timeout.Token) is not { } line) return null;
+        var first = Wire.DecodeClient(line);
 
-        var player = Wire.DecodeClient(line) switch
+        if (first is Hello { Version: Wire.ProtocolVersion } dh && Names.IsDemiurge(dh.Name) && _demiurgePassword is not null &&
+            CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(dh.Password ?? ""), _demiurgePassword))
+        {
+            await RunRemoteDemiurgeAsync(connection, ct);
+            return null;
+        }
+
+        var player = first switch
         {
             not Hello => Refuse("Il primo messaggio deve essere hello."),
             Hello { Version: not Wire.ProtocolVersion } => Refuse($"Versione del protocollo non supportata: il server usa la {Wire.ProtocolVersion}. Aggiorna il client."),
             Hello h when !PasswordMatches(h.Password) => Refuse("Parola d'ordine errata."),
             Hello h when !Names.IsValid(h.Name) => Refuse($"Scegli un nome di 1–{Names.MaxLength} lettere o cifre, senza spazi."),
-            Hello h when Names.IsDemiurge(h.Name) => Refuse($"Il nome «{Names.Demiurge}» è riservato a chi conduce la partita."),
+            Hello h when Names.IsDemiurge(h.Name) => Refuse(_demiurgePassword is null
+                ? $"Il nome «{Names.Demiurge}» è riservato a chi conduce la partita."
+                : "Parola d'ordine del Demiurgo errata."),
             Hello when _players.Count >= MaxPlayers => Refuse("La sessione è al completo."),
             Hello h when !_players.TryAdd(h.Name, new(h.Name, connection)) => Refuse($"Il nome «{h.Name}» è già in uso."),
             Hello h => _players[h.Name],
@@ -303,6 +354,32 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         {
             connection.Post(Wire.Encode(new Refused(reason)));
             return null;
+        }
+    }
+
+    /// <summary>La sessione di chi conduce da remoto: ogni riga che manda è un comando del Demiurgo (o testo da dire a tutti).</summary>
+    private async Task RunRemoteDemiurgeAsync(IConnection connection, CancellationToken ct)
+    {
+        connection.Post(Wire.Encode(new Welcome(Names.Demiurge, Present(), new MapData(Map.Name, Map.Rows), Positions())));
+        lock (_combatLock) connection.Post(Wire.Encode(new EnemyList([.. Combat.Enemies.Select(Info)])));
+        _remoteDemiurges.TryAdd(connection, 0);
+        demiurgeView(new Narrated("Il Demiurgo conduce da remoto."));
+        try
+        {
+            while (await connection.ReadLineAsync(ct) is { } line)
+            {
+                var message = Wire.DecodeClient(line);
+                if (message is Leave) break;
+                var text = message switch { Command(var l) => l, Say(var t) => t, _ => null };
+                ServerMessage? reply = text is null ? new Refused("Da remoto il Demiurgo manda solo comandi e testo.")
+                    : text.Trim() is "/fine" ? new Refused("La sessione si chiude solo dalla console del server.")
+                    : await ExecuteAsync(text);
+                if (reply is not null) connection.Post(Wire.Encode(reply));
+            }
+        }
+        finally
+        {
+            _remoteDemiurges.TryRemove(connection, out _);
         }
     }
 
@@ -345,7 +422,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             Broadcast(rolled);
             return null;
         }
-        demiurgeView(rolled); // un tiro segreto lo vedono solo chi tira e il Demiurgo
+        View(rolled); // un tiro segreto lo vedono solo chi tira e il Demiurgo
         return Names.IsDemiurge(from) ? null : rolled;
     }
 
@@ -359,7 +436,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         if (!Names.IsDemiurge(to) && !_players.TryGetValue(to, out target)) return new($"«{to}» non è nella sessione.");
 
         var whisper = new Whispered(from, target?.Name ?? Names.Demiurge, clean);
-        demiurgeView(whisper); // il Demiurgo sente ogni sussurro
+        View(whisper); // il Demiurgo sente ogni sussurro
         target?.Send(whisper);
         if (!Names.IsDemiurge(from) && _players.TryGetValue(from, out var sender)) sender.Send(whisper);
         return null;
@@ -370,7 +447,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         var sheet = SheetOf(owner);
         if (!sheet.TrySet(key, value, out var error)) return new Refused(error);
         var updated = new SheetShown(sheet.Owner, sheet.Snapshot(), actor);
-        if (!Names.IsDemiurge(actor)) demiurgeView(updated);
+        if (!Names.IsDemiurge(actor)) View(updated);
         return updated;
     }
 
@@ -381,7 +458,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         foreach (var (key, value) in fields)
             if (!sheet.TrySet(key, value, out var error)) return new Refused($"{key.Sanitized}: {error}");
         var updated = new SheetShown(sheet.Owner, sheet.Snapshot(), owner);
-        demiurgeView(updated);
+        View(updated);
         return updated;
     }
 
@@ -486,6 +563,9 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
                 return updated;
             case "chi":
                 return new PlayerList(Present());
+            case "aiuto":
+                return new Said(Names.Demiurge, "[solo per te] Comandi: <testo> parla a tutti · /narra · /tira · /segreto · /sussurra <nome> · /scheda <nome> · " +
+                    "/imposta <nome> <campo> [valore] · /chi · /espelli <nome> · /avventura [n] · /mappa <file> · /nemici · /evoca <tipo> [livello] [capo] · /pace · /cura [nome]");
             case "avventura":
                 if (rest.Length == 0) return AdventureList();
                 return int.TryParse(rest, out var number) ? StartAdventure(number) : new Refused("Uso: /avventura <numero>");
@@ -591,7 +671,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
 
     private void Broadcast(ServerMessage message, string? except = null)
     {
-        demiurgeView(message);
+        View(message);
         var line = Wire.Encode(message);
         foreach (var player in _players.Values)
             if (player.Ready && !player.Name.IsSameName(except))
@@ -605,6 +685,9 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         await Task.WhenAll(_players.Values.Select(p => p.Connection.FlushAsync(TimeSpan.FromSeconds(1))));
         await _stopping.CancelAsync();
         _listener.Stop();
+        _web?.Stop();
+        if (_webLoop is not null) await _webLoop;
+        _web?.Dispose();
         if (_ticker is not null) await _ticker;
         foreach (var player in _players.Values) player.Connection.Close();
         if (_acceptLoop is not null) await _acceptLoop;

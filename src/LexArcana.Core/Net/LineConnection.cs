@@ -13,7 +13,7 @@ namespace LexArcana.Net;
 /// non legge, la connessione si chiude invece di rallentare tutti gli altri.</item>
 /// </list>
 /// </summary>
-public sealed class LineConnection : IAsyncDisposable
+public sealed class LineConnection : IConnection
 {
     public const int MaxLineBytes = 16 * 1024;
     public const int MaxQueuedLines = 512;
