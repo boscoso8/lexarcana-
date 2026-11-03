@@ -7,6 +7,15 @@ namespace LexArcana.Visione;
 
 internal sealed record VisioneOptions(string Host, int Port, string Name, string? Password, string? CapturePath, float CaptureAfter, (float X, float Z, float Yaw, float Pitch)? Frame = null, Character? Character = null, bool ShowSheet = false, string? CharacterPath = null, bool AutoFight = false)
 {
+    /// <summary>Comandi touch al posto di mouse e tastiera (browser su telefono o tablet).</summary>
+    public bool Touch { get; init; }
+    /// <summary>Chiede una riga di testo all'utente fuori dalla finestra 3D (nel browser: la tastiera di iOS). Null sul desktop.</summary>
+    public Func<string?>? AskText { get; init; }
+    /// <summary>Dove salvare il personaggio quando guadagna esperienza, se non c'è un file (nel browser: il suo archivio locale).</summary>
+    public Action<Character>? SaveCharacter { get; init; }
+    /// <summary>Le dita sullo schermo, lette dalla pagina: id, x, y per ognuna. Null: si usa il touch di raylib.</summary>
+    public Func<double[]>? TouchPoints { get; init; }
+
     public const string Usage = """
         lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
             Entra nella sessione di un Demiurgo e guarda il mondo con gli occhi del tuo personaggio.

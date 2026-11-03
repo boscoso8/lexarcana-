@@ -81,9 +81,24 @@ internal sealed class Lighting : IDisposable
 
     private readonly int _viewPos, _ambient, _fogColor, _fogDensity, _lightCount, _lightPos, _lightColor, _lightRange, _pattern, _emissive;
 
+    /// <summary>Lo stesso shader in GLSL ES 1.00, per il browser (raylib per il web usa OpenGL ES 2 su WebGL).</summary>
+    private static string ForEs2(string source, bool fragment)
+    {
+        var s = source.Replace("#version 330", fragment ? "#version 100\nprecision mediump float;" : "#version 100", StringComparison.Ordinal);
+        if (fragment)
+            s = s.Replace("in vec3 ", "varying vec3 ", StringComparison.Ordinal)
+                 .Replace("out vec4 finalColor;", "", StringComparison.Ordinal)
+                 .Replace("finalColor = ", "gl_FragColor = ", StringComparison.Ordinal);
+        else
+            s = s.Replace("in vec3 ", "attribute vec3 ", StringComparison.Ordinal)
+                 .Replace("out vec3 ", "varying vec3 ", StringComparison.Ordinal);
+        return s;
+    }
+
     public Lighting()
     {
-        Shader = Raylib.LoadShaderFromMemory(Vertex, Fragment);
+        bool es2 = Rlgl.GetVersion() == GlVersion.OpenGlEs20;
+        Shader = es2 ? Raylib.LoadShaderFromMemory(ForEs2(Vertex, false), ForEs2(Fragment, true)) : Raylib.LoadShaderFromMemory(Vertex, Fragment);
         _viewPos = Raylib.GetShaderLocation(Shader, "viewPos");
         _ambient = Raylib.GetShaderLocation(Shader, "ambient");
         _fogColor = Raylib.GetShaderLocation(Shader, "fogColor");

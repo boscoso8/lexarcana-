@@ -150,6 +150,28 @@ Nella finestra: **clic sinistro / destro** per colpire in mischia / a distanza, 
 
 ![Due personaggi nel corridoio d'ingresso](docs/personaggi.png)
 
+### Da iPhone (e da qualsiasi browser)
+
+Il Demiurgo apre anche la porta web:
+
+```bash
+dotnet run --project src/LexArcana -- server --porta-web 8080 --web src/LexArcana.Web/bin/Release/net10.0/publish/wwwroot
+```
+
+Prima va compilato il client web, con `dotnet publish src/LexArcana.Web -c Release`; nei pacchetti della release è già incluso, nella cartella `web`, e basta `--porta-web 8080`.
+
+Sull'iPhone si apre Safari su `http://<indirizzo del Demiurgo>:8080`, si sceglie nome e vocazione e si entra, senza installare niente. Il gioco 3D è lo stesso, compilato in WebAssembly e collegato al server via WebSocket:
+
+- **Comandi:** il pollice sinistro sul joystick per camminare (spinto fino in fondo si corre), un dito a destra per guardare intorno.
+- **Pulsanti:** COLPISCI, TIRA, PARLA (apre la tastiera) e SCHEDA. Se il mirino è vuoto, il colpo va al nemico più vicino davanti a te, o a chi ti attacca alle spalle.
+- **Schermo:** il telefono va tenuto in orizzontale.
+- **Salvataggio:** il personaggio e l'esperienza restano salvati in Safari, quindi tornando con lo stesso nome si riprende da dove si era rimasti.
+- **Schermata Home:** con "Aggiungi a Home" Lex Arcana si apre a schermo intero, come un'app.
+
+![Il client 3D su un iPhone in orizzontale (emulato in Chromium)](docs/iphone.png)
+
+Il progetto web non è nella soluzione, perché per compilarlo serve il carico di lavoro WebAssembly di .NET: `dotnet workload install wasm-tools`.
+
 ### Mappe
 
 Il Demiurgo sceglie il luogo con `--mappa`:
@@ -219,6 +241,7 @@ I dadi usano la notazione standard: `d20`, `3d6+2`, `1d8+1d4-1` (fino a 100 dadi
   - `Campaigns/`: il generatore di campagne, quello delle mappe (`MapGenerator`) e il manuale in Markdown.
   - `Game/GameMap.cs`: le mappe, le collisioni (anche il server le usa per rifiutare chi attraversa i muri) e la linea di vista.
 - `src/LexArcana`: l'eseguibile (`server` / `client`).
+- `src/LexArcana.Web`: lo stesso client 3D per il browser e per l'iPhone. È compilato in WebAssembly con gli stessi sorgenti, i comandi touch (`TouchControls.cs`) e una pagina d'ingresso.
 - `src/LexArcana.Visione`: il client 3D con [Raylib-cs](https://github.com/raylib-cs/raylib-cs).
   - `World.cs`: il luogo e i personaggi.
   - `Lighting.cs`: lo shader, con la lanterna del personaggio, i fuochi degli altari, la luna e la nebbia.

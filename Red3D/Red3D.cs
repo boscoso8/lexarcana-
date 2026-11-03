@@ -1,6 +1,6 @@
 // Red3D.cs — Lex Arcana: rete e 3D in un solo file.
 // Generato da tools/GeneraRed3D.cs: non modificarlo a mano, modifica i sorgenti in src/ e rigeneralo.
-// Contiene 41 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
+// Contiene 42 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
 //
 // Avvio del client 3D: dotnet run --project Red3D -- --personaggio aurelia.json --host <indirizzo del Demiurgo>
 // Il server e gli strumenti (personaggi, campagne) sono nel progetto completo: src/LexArcana.
@@ -818,10 +818,14 @@ namespace LexArcana.Characters
         }
 
         /// <summary>Un personaggio casuale ma valido. Con lo stesso seme esce sempre lo stesso.</summary>
-        public static Character Random(string player, int seed)
+        public static Character Random(string player, int seed) => Random(player, seed, null);
+
+        /// <summary>Come <see cref="Random(string, int)"/>, ma con la vocazione scelta (se esiste).</summary>
+        public static Character Random(string player, int seed, string? vocationName)
         {
             var random = new Random(seed);
             var vocation = Rules.Vocations[random.Next(Rules.Vocations.Count)];
+            if (vocationName is not null && Rules.FindVocation(vocationName) is { } chosen) vocation = chosen;
             var origin = Rules.Origins[random.Next(Rules.Origins.Count)];
 
             // Più punti dove la vocazione ne ha bisogno, il resto a caso.
@@ -2007,9 +2011,9 @@ namespace LexArcana.Net
     public sealed class GameClient : IAsyncDisposable
     {
         private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(15);
-        private readonly LineConnection _connection;
+        private readonly IConnection _connection;
 
-        private GameClient(LineConnection connection, Welcome welcome)
+        private GameClient(IConnection connection, Welcome welcome)
         {
             _connection = connection;
             Welcome = welcome;
@@ -2018,17 +2022,45 @@ namespace LexArcana.Net
         public Welcome Welcome { get; }
         public string Name => Welcome.Name;
 
-        /// <summary>Si collega e si presenta. Se il server rifiuta, lancia <see cref="ConnectionRefusedException"/> con il motivo.</summary>
+        /// <summary>Si collega via TCP e si presenta. Se il server rifiuta, lancia <see cref="ConnectionRefusedException"/> con il motivo.</summary>
         public static async Task<GameClient> ConnectAsync(string host, int port, string name, string? password = null, CancellationToken ct = default)
         {
             var tcp = new TcpClient();
-            LineConnection? connection = null;
             try
             {
                 await tcp.ConnectAsync(host, port, ct);
-                connection = new LineConnection(tcp);
-                connection.Post(Wire.Encode(new Hello(name, string.IsNullOrEmpty(password) ? null : password)));
+            }
+            catch
+            {
+                tcp.Dispose();
+                throw;
+            }
+            return await HelloAsync(new LineConnection(tcp), name, password, ct);
+        }
 
+        /// <summary>
+        /// Si collega via WebSocket (es. <c>ws://host:8080/ws</c>) e si presenta: è la strada dei browser, iPhone compreso.
+        /// </summary>
+        public static async Task<GameClient> ConnectWebSocketAsync(Uri uri, string name, string? password = null, CancellationToken ct = default)
+        {
+            var socket = new System.Net.WebSockets.ClientWebSocket();
+            try
+            {
+                await socket.ConnectAsync(uri, ct);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+            return await HelloAsync(new WebSocketConnection(socket, uri.ToString()), name, password, ct);
+        }
+
+        private static async Task<GameClient> HelloAsync(IConnection connection, string name, string? password, CancellationToken ct)
+        {
+            try
+            {
+                connection.Post(Wire.Encode(new Hello(name, string.IsNullOrEmpty(password) ? null : password)));
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeout.CancelAfter(HelloTimeout);
                 var reply = await connection.ReadLineAsync(timeout.Token) is { } line
@@ -2043,8 +2075,7 @@ namespace LexArcana.Net
             }
             catch
             {
-                if (connection is not null) await connection.DisposeAsync();
-                tcp.Dispose();
+                await connection.DisposeAsync();
                 throw;
             }
         }
@@ -2062,7 +2093,7 @@ namespace LexArcana.Net
             {
                 string? line;
                 try { line = await _connection.ReadLineAsync(ct); }
-                catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException) { yield break; }
+                catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException or System.Net.WebSockets.WebSocketException) { yield break; }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested) { yield break; } // chiusa da noi
                 if (line is null) yield break;
                 yield return Wire.DecodeServer(line);
@@ -3678,6 +3709,22 @@ namespace LexArcana.Visione
         }
 
         public bool Typing { get; private set; }
+
+        /// <summary>Disposizione per schermi touch: chat in alto a sinistra, salute in alto a destra, il basso libero per i pollici.</summary>
+        public bool Compact { get; init; }
+
+        /// <summary>Un'etichetta in Cinzel centrata in un rettangolo (i pulsanti touch).</summary>
+        public void DrawCentered(string text, Rectangle rect, Tone tone)
+        {
+            float size = Math.Clamp(rect.Height * 0.28f, 11f, 22f);
+            var m = Raylib.MeasureTextEx(_caps, text, size, 1);
+            if (m.X > rect.Width * 0.86f)
+            {
+                size *= rect.Width * 0.86f / m.X;   // l'etichetta si stringe per stare nel pulsante
+                m = Raylib.MeasureTextEx(_caps, text, size, 1);
+            }
+            DrawCaps(text, new(rect.X + (rect.Width - m.X) / 2, rect.Y + (rect.Height - m.Y) / 2), size, Theme.Of(tone));
+        }
         public string Input => _input.ToString();
 
         public void Add(StyledText text, double now)
@@ -3765,10 +3812,11 @@ namespace LexArcana.Visione
             }
 
             // Registro della chat, dal basso verso l'alto
-            var recent = _log.Where(e => Typing || now - e.Time < FadeAfter + 2).TakeLast(VisibleMessages).ToList();
+            if (Compact) width = MathF.Min(width, MathF.Max(260, w * 0.46f));
+            var recent = _log.Where(e => Typing || now - e.Time < FadeAfter + 2).TakeLast(Compact ? 4 : VisibleMessages).ToList();
             var laid = recent.Select(e => (Lines: Wrap(e.Text, width - 24, TextSize), e.Time)).ToList();
-            float bottom = h - Margin - (Typing ? LineHeight + 20 : 0);
             float total = laid.Sum(l => l.Lines.Count) * LineHeight;
+            float bottom = Compact ? 52 + total + 12 : h - Margin - (Typing ? LineHeight + 20 : 0);
             if (laid.Count > 0)
             {
                 byte panelAlpha = (byte)(Typing ? 200 : 140);
@@ -3794,13 +3842,26 @@ namespace LexArcana.Visione
                 bool caret = (int)(now * 2) % 2 == 0;
                 DrawText(_input + (caret ? "|" : " "), new(box.X + 12, box.Y + 5), TextSize, Theme.Of(Tone.Ink));
             }
-            else
+            else if (!Compact)
             {
                 DrawText("Invio per parlare · F1 aiuto", new(w - Margin - Measure("Invio per parlare · F1 aiuto", 18), h - Margin - 20), 18, Theme.Of(Tone.Muted, 190));
             }
 
             if (present.Count > 0 && Raylib.IsKeyDown(KeyboardKey.Tab)) DrawPresent(present, w);
-            if (showHelp) DrawHelp(w, h);
+            if (showHelp && !Compact) DrawHelp(w, h);
+            if (showHelp && Compact)
+            {
+                const string tip = "Pollice sinistro: cammina · trascina a destra: guarda · COLPISCI e TIRA: combatti";
+                var lines = Wrap(new StyledText().Add(tip, Tone.Ink), MathF.Min(620, w - 40), 20);
+                float ty = h * 0.42f;
+                foreach (var line in lines)
+                {
+                    float lw = line.Sum(p => Measure(p.Text, 20));
+                    Raylib.DrawRectangleRec(new(w / 2f - lw / 2 - 10, ty - 2, lw + 20, 26), Theme.WithAlpha(Theme.Panel, 200));
+                    DrawLine(line, new(w / 2f - lw / 2, ty), 20, 255);
+                    ty += 28;
+                }
+            }
             if (overlay is not null) DrawOverlay(overlay, w, h);
         }
 
@@ -3878,7 +3939,7 @@ namespace LexArcana.Visione
         public void DrawVitals(Vitals v)
         {
             int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
-            float width = 330, x = w - Margin - width, y = h - Margin - 92;
+            float width = Compact ? MathF.Min(260, w * 0.3f) : 330, x = w - Margin - width, y = Compact ? Margin + 10 : h - Margin - 92;
             Raylib.DrawRectangleRec(new(x - 12, y - 10, width + 24, 72), Theme.WithAlpha(Theme.Panel, 170));
             DrawCaps($"LIVELLO {v.Level}", new(x, y - 2), 15, Theme.Of(Tone.Gilt));
             var health = $"{v.Health}/{v.MaxHealth}";
@@ -4105,9 +4166,24 @@ namespace LexArcana.Visione
 
         private readonly int _viewPos, _ambient, _fogColor, _fogDensity, _lightCount, _lightPos, _lightColor, _lightRange, _pattern, _emissive;
 
+        /// <summary>Lo stesso shader in GLSL ES 1.00, per il browser (raylib per il web usa OpenGL ES 2 su WebGL).</summary>
+        private static string ForEs2(string source, bool fragment)
+        {
+            var s = source.Replace("#version 330", fragment ? "#version 100\nprecision mediump float;" : "#version 100", StringComparison.Ordinal);
+            if (fragment)
+                s = s.Replace("in vec3 ", "varying vec3 ", StringComparison.Ordinal)
+                     .Replace("out vec4 finalColor;", "", StringComparison.Ordinal)
+                     .Replace("finalColor = ", "gl_FragColor = ", StringComparison.Ordinal);
+            else
+                s = s.Replace("in vec3 ", "attribute vec3 ", StringComparison.Ordinal)
+                     .Replace("out vec3 ", "varying vec3 ", StringComparison.Ordinal);
+            return s;
+        }
+
         public Lighting()
         {
-            Shader = Raylib.LoadShaderFromMemory(Vertex, Fragment);
+            bool es2 = Rlgl.GetVersion() == GlVersion.OpenGlEs20;
+            Shader = es2 ? Raylib.LoadShaderFromMemory(ForEs2(Vertex, false), ForEs2(Fragment, true)) : Raylib.LoadShaderFromMemory(Vertex, Fragment);
             _viewPos = Raylib.GetShaderLocation(Shader, "viewPos");
             _ambient = Raylib.GetShaderLocation(Shader, "ambient");
             _fogColor = Raylib.GetShaderLocation(Shader, "fogColor");
@@ -4203,6 +4279,137 @@ namespace LexArcana.Visione
     }
 }
 
+// ===== src/LexArcana.Visione/TouchControls.cs =====
+namespace LexArcana.Visione
+{
+    /// <summary>
+    /// I comandi per schermi touch (iPhone, iPad, telefoni): un joystick a sinistra per camminare,
+    /// trascinare a destra per guardare, pulsanti per colpire, tirare, parlare e aprire la scheda.
+    /// Funziona con le dita e, per provarlo da computer, anche con il mouse.
+    /// </summary>
+    internal sealed class TouchControls(Func<double[]>? source = null)
+    {
+        public enum Button { Melee, Ranged, Talk, Sheet }
+
+        private readonly Dictionary<int, (Vector2 Start, Vector2 Last, string Role)> _touches = [];
+        private Vector2 _joyOrigin, _joyKnob;
+        private bool _joyActive;
+
+        public Vector2 Move { get; private set; }          // x: di lato (+ destra), y: avanti
+        public Vector2 Look { get; private set; }          // pixel trascinati in questo fotogramma
+        public HashSet<Button> Pressed { get; } = [];
+
+        private static float Unit => MathF.Max(48f, MathF.Min(Raylib.GetScreenWidth(), Raylib.GetScreenHeight()) * 0.11f);
+
+        public static IEnumerable<(Button Button, Rectangle Rect, string Label)> Buttons()
+        {
+            int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
+            float u = Unit, gap = u * 0.25f;
+            yield return (Button.Melee, new Rectangle(w - u * 1.6f - gap, h - u * 1.6f - gap, u * 1.6f, u * 1.6f), "COLPISCI");
+            yield return (Button.Ranged, new Rectangle(w - u * 3.0f - gap * 2, h - u * 1.15f - gap, u * 1.3f, u * 1.15f), "TIRA");
+            yield return (Button.Talk, new Rectangle(w - u * 1.6f - gap, h - u * 2.6f - gap * 2, u * 1.6f, u * 0.8f), "PARLA");
+            yield return (Button.Sheet, new Rectangle(w - u * 3.0f - gap * 2, h - u * 2.6f - gap * 2, u * 1.3f, u * 0.8f), "SCHEDA");
+        }
+
+        public void Update()
+        {
+            Pressed.Clear();
+            Look = Vector2.Zero;
+            int w = Raylib.GetScreenWidth();
+
+            // Le dita presenti in questo fotogramma (con il mouse come dito numero -1, per le prove da computer).
+            // Nel browser le dita le legge la pagina (source: id, x, y, id, x, y…): è più affidabile della gestione
+            // del touch di raylib per il web, che a volte non registra il sollevamento di un dito.
+            var now = new Dictionary<int, Vector2>();
+            int count;
+            if (source is not null)
+            {
+                var flat = source();
+                for (int i = 0; i + 2 < flat.Length; i += 3) now[(int)flat[i]] = new Vector2((float)flat[i + 1], (float)flat[i + 2]);
+                count = now.Count;
+            }
+            else
+            {
+                count = Raylib.GetTouchPointCount();
+                for (int i = 0; i < count; i++) now[Raylib.GetTouchPointId(i)] = Raylib.GetTouchPosition(i);
+            }
+            if (count == 0 && Raylib.IsMouseButtonDown(MouseButton.Left)) now[-1] = Raylib.GetMousePosition();
+
+            foreach (var (id, pos) in now)
+            {
+                if (!_touches.TryGetValue(id, out var t))
+                {
+                    // un dito nuovo: un pulsante, il joystick (metà sinistra) o lo sguardo (il resto)
+                    string role = "look";
+                    foreach (var (button, rect, _) in Buttons())
+                        if (Raylib.CheckCollisionPointRec(pos, rect)) { role = "button"; Pressed.Add(button); break; }
+                    if (role == "look" && pos.X < w * 0.4f && !_joyActive)
+                    {
+                        role = "joy";
+                        _joyActive = true;
+                        _joyOrigin = pos;
+                    }
+                    _touches[id] = (pos, pos, role);
+                    continue;
+                }
+                if (t.Role == "look") Look += pos - t.Last;
+                if (t.Role == "joy") _joyKnob = pos;
+                _touches[id] = t with { Last = pos };
+            }
+            foreach (var gone in _touches.Keys.Where(id => !now.ContainsKey(id)).ToList())
+            {
+                if (_touches[gone].Role == "joy") _joyActive = false;
+                _touches.Remove(gone);
+            }
+
+            if (_joyActive)
+            {
+                var delta = (_joyKnob == Vector2.Zero ? _joyOrigin : _joyKnob) - _joyOrigin;
+                float radius = Unit * 1.1f;
+                if (delta.Length() > radius) delta = Vector2.Normalize(delta) * radius;
+                _joyKnob = _joyOrigin + delta;
+                var v = delta / radius;
+                Move = new Vector2(v.X, -v.Y);
+            }
+            else
+            {
+                Move = Vector2.Zero;
+                _joyKnob = Vector2.Zero;
+            }
+        }
+
+        public void Draw()
+        {
+            float u = Unit;
+            if (_joyActive)
+            {
+                Raylib.DrawCircleV(_joyOrigin, u * 1.1f, Theme.WithAlpha(Theme.Night, 110));
+                Raylib.DrawCircleLinesV(_joyOrigin, u * 1.1f, Theme.Of(Tone.Gilt, 160));
+                Raylib.DrawCircleV(_joyKnob, u * 0.45f, Theme.Of(Tone.Gilt, 170));
+            }
+            else
+            {
+                int h = Raylib.GetScreenHeight();
+                var hint = new Vector2(u * 1.7f, h - u * 1.7f);
+                Raylib.DrawCircleLinesV(hint, u * 1.1f, Theme.Of(Tone.Muted, 90));
+                Raylib.DrawCircleV(hint, u * 0.45f, Theme.Of(Tone.Muted, 60));
+            }
+        }
+
+        /// <summary>I pulsanti, disegnati dall'HUD con i suoi font.</summary>
+        public static void DrawButtons(Hud hud)
+        {
+            foreach (var (button, rect, label) in Buttons())
+            {
+                bool primary = button == Button.Melee;
+                Raylib.DrawRectangleRounded(rect, 0.3f, 8, primary ? Theme.WithAlpha(Theme.Fresco, 200) : Theme.WithAlpha(Theme.Night, 170));
+                Raylib.DrawRectangleRoundedLinesEx(rect, 0.3f, 8, 1.5f, Theme.Of(Tone.Gilt, 200));
+                hud.DrawCentered(label, rect, primary ? Tone.Ink : Tone.Gilt);
+            }
+        }
+    }
+}
+
 // ===== src/LexArcana.Visione/VisioneApp.cs =====
 namespace LexArcana.Visione
 {
@@ -4239,7 +4446,26 @@ namespace LexArcana.Visione
         private bool _showHelp = true, _helpPinned, _mouseCaptured = true, _quit;
         private string? _overlay;
 
+        private Lighting? _lighting;
+        private Hud? _hud;
+        private double _start;
+        private bool _captured;
+        private readonly (Vector3, Vector3, float)[] _lights = new (Vector3, Vector3, float)[Lighting.MaxLights];
+        private readonly CancellationTokenSource _network = new();
+        private Task? _receiving;
+        private TouchControls? _touch;
+
+        /// <summary>Sul desktop: apre la finestra, gira finché la si chiude, poi libera tutto.</summary>
         public int Run()
+        {
+            Start(1280, 720);
+            while (Frame()) { }
+            Stop();
+            return 0;
+        }
+
+        /// <summary>Prepara la scena e apre la finestra (nel browser: il canvas della pagina).</summary>
+        public void Start(int width, int height)
         {
             var welcome = client.Welcome;
             _present.AddRange(welcome.Players);
@@ -4256,98 +4482,113 @@ namespace LexArcana.Visione
             }
             _lastSent = _pose;
 
-            using var network = new CancellationTokenSource();
-            var receiving = Task.Run(() => ReceiveAsync(network.Token));
+            _receiving = Task.Run(() => ReceiveAsync(_network.Token));
             if (options.Character is { } character)
                 client.Send(new Embody(character));
 
-            Raylib.SetConfigFlags(ConfigFlags.Msaa4xHint | ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint);
-            Raylib.InitWindow(1280, 720, $"Lex Arcana · {client.Name}");
+            bool browser = OperatingSystem.IsBrowser();
+            Raylib.SetConfigFlags(browser ? ConfigFlags.Msaa4xHint : ConfigFlags.Msaa4xHint | ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint);
+            Raylib.InitWindow(width, height, $"Lex Arcana · {client.Name}");
             Raylib.SetExitKey(KeyboardKey.Null);
-            Raylib.SetTargetFPS(60);
-            Raylib.DisableCursor();
+            if (!browser) Raylib.SetTargetFPS(60); // nel browser il ritmo lo dà requestAnimationFrame
+            if (options.Touch) { _touch = new TouchControls(options.TouchPoints); _mouseCaptured = false; }
+            else Raylib.DisableCursor();
 
-            var assets = Path.Combine(AppContext.BaseDirectory, "Assets");
-            using (var lighting = new Lighting())
-            using (var hud = new Hud(assets))
+            _lighting = new Lighting();
+            _hud = new Hud(Path.Combine(AppContext.BaseDirectory, "Assets")) { Compact = options.Touch };
+            _world = new World(_map, _lighting);
+            _start = Raylib.GetTime();
+            _hud.Add(_renderer.Render(welcome)!, 0);
+        }
+
+        /// <summary>Un fotogramma: rete, comandi, simulazione locale e disegno. False quando si deve chiudere.</summary>
+        public bool Frame()
+        {
+            if (_quit || (!OperatingSystem.IsBrowser() && Raylib.WindowShouldClose())) return false;
+            var hud = _hud!;
+            var lighting = _lighting!;
+            var lights = _lights;
+            bool captured = _captured;
+            double now = Raylib.GetTime() - _start;
+            float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
+
+            Drain(hud, lighting, now);
+            var world = _world!;
+            HandleInput(hud, dt, now);
+            foreach (var avatar in _avatars.Values) avatar.Update(dt);
+            foreach (var enemy in _enemies.Values) enemy.Update(dt);
+            foreach (var gone in _enemies.Values.Where(e => e.DiedAt is { } d && now - d > 1.3).Select(e => e.Id).ToList()) _enemies.Remove(gone);
+            _floating.RemoveAll(f => now - f.Time > 1.4);
+            _shots.RemoveAll(s => now - s.Time > 0.2);
+            if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
+            SendPose(now);
+
+            var forward = new Vector3(MathF.Sin(_pose.Yaw) * MathF.Cos(_pitch), MathF.Sin(_pitch), MathF.Cos(_pose.Yaw) * MathF.Cos(_pitch));
+            var eye = new Vector3(_pose.X, EyeHeight, _pose.Z);
+            var camera = new Camera3D(eye, eye + forward, Vector3.UnitY, 70f, CameraProjection.Perspective);
+            _aimed = Aim(eye, forward);
+            if (_overlay is null && !hud.Typing && _vitals?.Down != true) HandleAttack(eye, forward, now);
+
+            int count = 0;
+            lights[count++] = (eye + new Vector3(0, -0.2f, 0) + forward * 0.3f, new Vector3(0.62f, 0.5f, 0.36f), 9f); // lanterna
+            foreach (var fire in world.Fires(now).Take(Lighting.MaxLights - 1)) lights[count++] = fire;
+            lighting.Frame(eye, lights.AsSpan(0, count));
+
+            Raylib.BeginDrawing();
+            Raylib.ClearBackground(Theme.Night);
+            Raylib.BeginMode3D(camera);
+            world.Draw(eye, now);
+            foreach (var avatar in _avatars.Values) world.DrawAvatar(avatar);
+            foreach (var enemy in _enemies.Values) world.DrawEnemy(enemy, now);
+            foreach (var shot in _shots) world.DrawShot(shot, now);
+            if (_vitals?.Down != true)
             {
-                _world = new World(_map, lighting);
-                var start = Raylib.GetTime();
-                hud.Add(_renderer.Render(welcome)!, 0);
-                bool captured = false;
-                var lights = new (Vector3, Vector3, float)[Lighting.MaxLights];
-
-                while (!_quit && !Raylib.WindowShouldClose())
-                {
-                    double now = Raylib.GetTime() - start;
-                    float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
-
-                    Drain(hud, lighting, now);
-                    var world = _world!;
-                    HandleInput(hud, dt, now);
-                    foreach (var avatar in _avatars.Values) avatar.Update(dt);
-                    foreach (var enemy in _enemies.Values) enemy.Update(dt);
-                    foreach (var gone in _enemies.Values.Where(e => e.DiedAt is { } d && now - d > 1.3).Select(e => e.Id).ToList()) _enemies.Remove(gone);
-                    _floating.RemoveAll(f => now - f.Time > 1.4);
-                    _shots.RemoveAll(s => now - s.Time > 0.2);
-                    if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
-                    SendPose(now);
-
-                    var forward = new Vector3(MathF.Sin(_pose.Yaw) * MathF.Cos(_pitch), MathF.Sin(_pitch), MathF.Cos(_pose.Yaw) * MathF.Cos(_pitch));
-                    var eye = new Vector3(_pose.X, EyeHeight, _pose.Z);
-                    var camera = new Camera3D(eye, eye + forward, Vector3.UnitY, 70f, CameraProjection.Perspective);
-                    _aimed = Aim(eye, forward);
-                    if (_overlay is null && !hud.Typing && _vitals?.Down != true) HandleAttack(eye, forward, now);
-
-                    int count = 0;
-                    lights[count++] = (eye + new Vector3(0, -0.2f, 0) + forward * 0.3f, new Vector3(0.62f, 0.5f, 0.36f), 9f); // lanterna
-                    foreach (var fire in world.Fires(now).Take(Lighting.MaxLights - 1)) lights[count++] = fire;
-                    lighting.Frame(eye, lights.AsSpan(0, count));
-
-                    Raylib.BeginDrawing();
-                    Raylib.ClearBackground(Theme.Night);
-                    Raylib.BeginMode3D(camera);
-                    world.Draw(eye, now);
-                    foreach (var avatar in _avatars.Values) world.DrawAvatar(avatar);
-                    foreach (var enemy in _enemies.Values) world.DrawEnemy(enemy, now);
-                    foreach (var shot in _shots) world.DrawShot(shot, now);
-                    if (_vitals?.Down != true)
-                    {
-                        float swing = (float)Math.Clamp((now - _swingAt) / SwingTime, 0, 1);
-                        world.DrawWeapon(eye, _pose.Yaw, _pitch, swing >= 1 ? 0 : swing, (float)now * 1.7f);
-                    }
-                    Raylib.EndMode3D();
-
-                    DrawEnemyTags(hud, camera, eye, forward);
-                    foreach (var f in _floating) hud.DrawFloating(f, Raylib.GetWorldToScreen(f.Position, camera), now);
-                    if (now - _hurtAt < 0.5) Hud.DrawHurt((float)(1 - (now - _hurtAt) / 0.5));
-                    if (_vitals is { } myVitals) hud.DrawVitals(myVitals);
-
-                    DrawNameTags(hud, camera, eye, forward);
-                    hud.DrawPlaceName(_map.Name);
-                    if (_showSheet || Raylib.IsKeyDown(KeyboardKey.C) && !hud.Typing) hud.DrawSheet(_mySheet, options.Character);
-                    if (_overlay is null && !hud.Typing && !_showHelp) Hud.DrawCrosshair();
-                    if (_vitals?.Down == true && _overlay is null) hud.DrawDown(CombatRespawnDelay - (now - _downSince));
-                    hud.Draw(now, _showHelp, _present, _overlay);
-                    Raylib.EndDrawing();
-
-                    if (options.CapturePath is { } path && !captured && now >= options.CaptureAfter)
-                    {
-                        var image = Raylib.LoadImageFromScreen();
-                        Raylib.ExportImage(image, path);
-                        Raylib.UnloadImage(image);
-                        captured = true;
-                        _quit = true;
-                    }
-                }
-                Dispose(); // la scena va liberata finché la finestra e il contesto OpenGL esistono
+                float swing = (float)Math.Clamp((now - _swingAt) / SwingTime, 0, 1);
+                world.DrawWeapon(eye, _pose.Yaw, _pitch, swing >= 1 ? 0 : swing, (float)now * 1.7f);
             }
+            Raylib.EndMode3D();
 
+            DrawEnemyTags(hud, camera, eye, forward);
+            foreach (var f in _floating) hud.DrawFloating(f, Raylib.GetWorldToScreen(f.Position, camera), now);
+            if (now - _hurtAt < 0.5) Hud.DrawHurt((float)(1 - (now - _hurtAt) / 0.5));
+            if (_vitals is { } myVitals) hud.DrawVitals(myVitals);
+
+            DrawNameTags(hud, camera, eye, forward);
+            hud.DrawPlaceName(_map.Name);
+            if (_showSheet || Raylib.IsKeyDown(KeyboardKey.C) && !hud.Typing) hud.DrawSheet(_mySheet, options.Character);
+            if (_overlay is null && !hud.Typing && !_showHelp) Hud.DrawCrosshair();
+            if (_vitals?.Down == true && _overlay is null) hud.DrawDown(CombatRespawnDelay - (now - _downSince));
+            if (_touch is { } controls && _overlay is null)
+            {
+                controls.Draw();
+                TouchControls.DrawButtons(hud);
+            }
+            hud.Draw(now, _showHelp, _present, _overlay);
+            Raylib.EndDrawing();
+
+            if (options.CapturePath is { } path && !captured && now >= options.CaptureAfter)
+            {
+                var image = Raylib.LoadImageFromScreen();
+                Raylib.ExportImage(image, path);
+                Raylib.UnloadImage(image);
+                captured = true;
+                _quit = true;
+            }
+            _captured = captured;
+            return !_quit;
+        }
+
+        /// <summary>Libera la scena e chiude la finestra.</summary>
+        public void Stop()
+        {
+            Dispose(); // la scena va liberata finché la finestra e il contesto OpenGL esistono
+            _hud?.Dispose();
+            _lighting?.Dispose();
             Raylib.CloseWindow();
             SaveExperience();
-            network.Cancel();
-            try { receiving.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { }
-            return 0;
+            _network.Cancel();
+            if (!OperatingSystem.IsBrowser())
+                try { _receiving?.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { }
         }
 
         public void Dispose()
@@ -4405,6 +4646,8 @@ namespace LexArcana.Visione
                         break;
                     case Vitals v when v.Name.IsSameName(client.Name):
                         if (v.Down && _vitals?.Down != true) _downSince = now;
+                        if (options.SaveCharacter is { } save && options.Character is { } me && v.Experience > me.Experience && v.Experience != _vitals?.Experience)
+                            save(me with { Experience = v.Experience });
                         _vitals = v;
                         continue;
                     case SheetShown sheet when sheet.Owner.IsSameName(client.Name):
@@ -4477,6 +4720,12 @@ namespace LexArcana.Visione
             if (options.AutoFight)
             {
                 AutoFight(dt);
+                return;
+            }
+
+            if (_touch is { } touch)
+            {
+                TouchInput(touch, hud, dt, now);
                 return;
             }
 
@@ -4564,16 +4813,72 @@ namespace LexArcana.Visione
         }
 
         private bool _autoAttack, _autoRanged;
+        private bool _touchMelee, _touchRanged;
+
+        /// <summary>Camminare con il joystick, guardare trascinando, pulsanti per colpire, tirare, parlare e la scheda.</summary>
+        private void TouchInput(TouchControls touch, Hud hud, float dt, double now)
+        {
+            touch.Update();
+            const float LookSpeed = 0.0065f;
+            float yaw = _pose.Yaw - touch.Look.X * LookSpeed;
+            _pitch = Math.Clamp(_pitch - touch.Look.Y * LookSpeed, -1.2f, 1.2f);
+            var forward = new Vector2(MathF.Sin(yaw), MathF.Cos(yaw));
+            var right = new Vector2(-forward.Y, forward.X);
+            var move = forward * touch.Move.Y + right * touch.Move.X;
+            float strength = MathF.Min(1f, move.Length());
+            if (strength > 0.05f) move = Vector2.Normalize(move) * (strength > 0.85f ? RunSpeed : WalkSpeed) * strength * dt;
+            else move = Vector2.Zero;
+            _pose = _map.Slide(_pose, move.X, move.Y, yaw);
+
+            if (touch.Pressed.Contains(TouchControls.Button.Melee)) _touchMelee = true;
+            if (touch.Pressed.Contains(TouchControls.Button.Ranged)) _touchRanged = true;
+            if (touch.Pressed.Contains(TouchControls.Button.Sheet)) _showSheet = !_showSheet;
+            if (touch.Pressed.Contains(TouchControls.Button.Talk) && options.AskText is { } ask && ask() is { Length: > 0 } line)
+                Submit(hud, line, now);
+            if (touch.Pressed.Count > 0) _showHelp = false;
+        }
+
+        private int? AssistAim(Vector3 eye, Vector3 forward, float reach)
+        {
+            var flat = Vector2.Normalize(new Vector2(forward.X, forward.Z));
+            return _enemies.Values
+                .Where(e => e.DiedAt is null)
+                .Select(e => (e, to: e.Position - new Vector2(eye.X, eye.Z)))
+                .Where(x => x.to.Length() <= reach && x.to.Length() > 0.01f
+                            && Vector2.Dot(Vector2.Normalize(x.to), flat) > MathF.Cos(0.9f)
+                            && _map.HasLineOfSight(eye.X, eye.Z, x.e.Position.X, x.e.Position.Y))
+                .OrderBy(x => x.to.Length())
+                .Select(x => (int?)x.e.Id)
+                .FirstOrDefault();
+        }
 
         private void HandleAttack(Vector3 eye, Vector3 forward, double now)
         {
-            if (!(_mouseCaptured || options.AutoFight) || now < _nextAttackAt) return;
-            bool melee = Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.F) || (_autoAttack && !_autoRanged);
-            bool ranged = Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.R) || (_autoAttack && _autoRanged);
+            bool touchMelee = _touchMelee, touchRanged = _touchRanged;
+            _touchMelee = _touchRanged = false;
+            if (!(_mouseCaptured || options.AutoFight || _touch is not null) || now < _nextAttackAt) return;
+            bool mouse = _touch is null;
+            bool melee = mouse && (Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.F)) || (_autoAttack && !_autoRanged) || touchMelee;
+            bool ranged = mouse && (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.R)) || (_autoAttack && _autoRanged) || touchRanged;
             _autoAttack = false;
             if (!melee && !ranged) return;
             _nextAttackAt = now + LocalCooldown;
             if (melee) _swingAt = now;
+            // Con il pollice mirare è difficile: sugli schermi touch, se il mirino è vuoto, si colpisce il nemico
+            // visibile più vicino davanti a sé (entro la portata del colpo scelto).
+            if (_aimed is null && _touch is not null) _aimed = AssistAim(eye, forward, ranged ? LexArcana.Combat.Fighter.RangedReach : LexArcana.Combat.Fighter.MeleeReach + 0.5f);
+            // e in mischia, se chi ti colpisce è alle spalle, ti giri verso di lui
+            if (_aimed is null && _touch is not null && melee)
+            {
+                var me = new Vector2(eye.X, eye.Z);
+                if (_enemies.Values.Where(e => e.DiedAt is null && Vector2.Distance(e.Position, me) <= LexArcana.Combat.Fighter.MeleeReach + 0.3f)
+                        .OrderBy(e => Vector2.Distance(e.Position, me)).FirstOrDefault() is { } behind)
+                {
+                    var to = behind.Position - me;
+                    _pose = _pose with { Yaw = MathF.Atan2(to.X, to.Y) };
+                    _aimed = behind.Id;
+                }
+            }
             if (_aimed is { } id && _enemies.TryGetValue(id, out var target))
             {
                 if (ranged) _shots.Add(new Shot(eye + forward * 0.5f - Vector3.UnitY * 0.15f, new Vector3(target.Position.X, target.Height * 0.55f, target.Position.Y), now));
@@ -4661,6 +4966,15 @@ namespace LexArcana.Visione
 {
     internal sealed record VisioneOptions(string Host, int Port, string Name, string? Password, string? CapturePath, float CaptureAfter, (float X, float Z, float Yaw, float Pitch)? Frame = null, Character? Character = null, bool ShowSheet = false, string? CharacterPath = null, bool AutoFight = false)
     {
+        /// <summary>Comandi touch al posto di mouse e tastiera (browser su telefono o tablet).</summary>
+        public bool Touch { get; init; }
+        /// <summary>Chiede una riga di testo all'utente fuori dalla finestra 3D (nel browser: la tastiera di iOS). Null sul desktop.</summary>
+        public Func<string?>? AskText { get; init; }
+        /// <summary>Dove salvare il personaggio quando guadagna esperienza, se non c'è un file (nel browser: il suo archivio locale).</summary>
+        public Action<Character>? SaveCharacter { get; init; }
+        /// <summary>Le dita sullo schermo, lette dalla pagina: id, x, y per ognuna. Null: si usa il touch di raylib.</summary>
+        public Func<double[]>? TouchPoints { get; init; }
+
         public const string Usage = """
             lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
                 Entra nella sessione di un Demiurgo e guarda il mondo con gli occhi del tuo personaggio.

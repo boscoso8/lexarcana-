@@ -153,6 +153,9 @@ internal sealed record Options
         }
 
         if (o.WebRoot is not null && o.WebPort is null) o = o with { WebPort = 8080 };
+        // nei pacchetti il client web sta nella cartella "web" accanto all'eseguibile: lo si usa da solo
+        if (o.WebPort is not null && o.WebRoot is null && Directory.Exists(Path.Combine(AppContext.BaseDirectory, "web")))
+            o = o with { WebRoot = Path.Combine(AppContext.BaseDirectory, "web") };
         if (o.MapFile is not null && o.CampaignFile is not null) return Fail("Usa --campagna oppure --mappa, non entrambe.", out error);
         if (mode == Mode.Client && o.CharacterFile is null && !Names.IsValid(o.Name))
             return Fail($"Il client vuole --nome (da 1 a {Names.MaxLength} lettere o cifre, senza spazi) oppure --personaggio <file>.", out error);

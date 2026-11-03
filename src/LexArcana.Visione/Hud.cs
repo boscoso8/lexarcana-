@@ -34,6 +34,22 @@ internal sealed partial class Hud : IDisposable
     }
 
     public bool Typing { get; private set; }
+
+    /// <summary>Disposizione per schermi touch: chat in alto a sinistra, salute in alto a destra, il basso libero per i pollici.</summary>
+    public bool Compact { get; init; }
+
+    /// <summary>Un'etichetta in Cinzel centrata in un rettangolo (i pulsanti touch).</summary>
+    public void DrawCentered(string text, Rectangle rect, Tone tone)
+    {
+        float size = Math.Clamp(rect.Height * 0.28f, 11f, 22f);
+        var m = Raylib.MeasureTextEx(_caps, text, size, 1);
+        if (m.X > rect.Width * 0.86f)
+        {
+            size *= rect.Width * 0.86f / m.X;   // l'etichetta si stringe per stare nel pulsante
+            m = Raylib.MeasureTextEx(_caps, text, size, 1);
+        }
+        DrawCaps(text, new(rect.X + (rect.Width - m.X) / 2, rect.Y + (rect.Height - m.Y) / 2), size, Theme.Of(tone));
+    }
     public string Input => _input.ToString();
 
     public void Add(StyledText text, double now)
@@ -121,10 +137,11 @@ internal sealed partial class Hud : IDisposable
         }
 
         // Registro della chat, dal basso verso l'alto
-        var recent = _log.Where(e => Typing || now - e.Time < FadeAfter + 2).TakeLast(VisibleMessages).ToList();
+        if (Compact) width = MathF.Min(width, MathF.Max(260, w * 0.46f));
+        var recent = _log.Where(e => Typing || now - e.Time < FadeAfter + 2).TakeLast(Compact ? 4 : VisibleMessages).ToList();
         var laid = recent.Select(e => (Lines: Wrap(e.Text, width - 24, TextSize), e.Time)).ToList();
-        float bottom = h - Margin - (Typing ? LineHeight + 20 : 0);
         float total = laid.Sum(l => l.Lines.Count) * LineHeight;
+        float bottom = Compact ? 52 + total + 12 : h - Margin - (Typing ? LineHeight + 20 : 0);
         if (laid.Count > 0)
         {
             byte panelAlpha = (byte)(Typing ? 200 : 140);
@@ -150,13 +167,26 @@ internal sealed partial class Hud : IDisposable
             bool caret = (int)(now * 2) % 2 == 0;
             DrawText(_input + (caret ? "|" : " "), new(box.X + 12, box.Y + 5), TextSize, Theme.Of(Tone.Ink));
         }
-        else
+        else if (!Compact)
         {
             DrawText("Invio per parlare · F1 aiuto", new(w - Margin - Measure("Invio per parlare · F1 aiuto", 18), h - Margin - 20), 18, Theme.Of(Tone.Muted, 190));
         }
 
         if (present.Count > 0 && Raylib.IsKeyDown(KeyboardKey.Tab)) DrawPresent(present, w);
-        if (showHelp) DrawHelp(w, h);
+        if (showHelp && !Compact) DrawHelp(w, h);
+        if (showHelp && Compact)
+        {
+            const string tip = "Pollice sinistro: cammina · trascina a destra: guarda · COLPISCI e TIRA: combatti";
+            var lines = Wrap(new StyledText().Add(tip, Tone.Ink), MathF.Min(620, w - 40), 20);
+            float ty = h * 0.42f;
+            foreach (var line in lines)
+            {
+                float lw = line.Sum(p => Measure(p.Text, 20));
+                Raylib.DrawRectangleRec(new(w / 2f - lw / 2 - 10, ty - 2, lw + 20, 26), Theme.WithAlpha(Theme.Panel, 200));
+                DrawLine(line, new(w / 2f - lw / 2, ty), 20, 255);
+                ty += 28;
+            }
+        }
         if (overlay is not null) DrawOverlay(overlay, w, h);
     }
 
@@ -234,7 +264,7 @@ internal sealed partial class Hud : IDisposable
     public void DrawVitals(Vitals v)
     {
         int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
-        float width = 330, x = w - Margin - width, y = h - Margin - 92;
+        float width = Compact ? MathF.Min(260, w * 0.3f) : 330, x = w - Margin - width, y = Compact ? Margin + 10 : h - Margin - 92;
         Raylib.DrawRectangleRec(new(x - 12, y - 10, width + 24, 72), Theme.WithAlpha(Theme.Panel, 170));
         DrawCaps($"LIVELLO {v.Level}", new(x, y - 2), 15, Theme.Of(Tone.Gilt));
         var health = $"{v.Health}/{v.MaxHealth}";

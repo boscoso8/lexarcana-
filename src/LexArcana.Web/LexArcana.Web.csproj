@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+
+  <!--
+    Il client 3D nel browser (Safari su iPhone compreso): gli stessi sorgenti di LexArcana.Visione,
+    compilati in WebAssembly con raylib, collegati al server via WebSocket.
+    Si pubblica con "dotnet publish src/LexArcana.Web -c Release" e lo serve il server del gioco,
+    con le opzioni porta-web e web (vedi il README).
+  -->
+  <PropertyGroup>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>LexArcana.Web</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <WasmBuildNative>true</WasmBuildNative>
+    <EmccExtraLDFlags>-sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2</EmccExtraLDFlags>
+    <!-- La raylib.a di Raylib-cs è compilata con un Emscripten più recente di quello di .NET 10: il suo
+         wasm-opt non riconosce le funzioni usate, quindi il collegamento finale si fa senza ottimizzarlo. -->
+    <EmccLinkOptimizationFlag>-O0</EmccLinkOptimizationFlag>
+    <!-- I sorgenti del client 3D sono pensati per il desktop e per il browser: niente avvisi per piattaforma. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Raylib-cs" Version="8.1.0" />
+    <ProjectReference Include="..\LexArcana.Core\LexArcana.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\LexArcana.Visione\*.cs" Exclude="..\LexArcana.Visione\Program.cs" LinkBase="Visione" />
+    <!-- gli stessi font anche per la pagina d'ingresso -->
+    <Content Include="..\LexArcana.Visione\Assets\Fonts\*.ttf" Link="wwwroot\fonts\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
