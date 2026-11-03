@@ -49,7 +49,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     private readonly CancellationTokenSource _stopping = new();
     private Task? _acceptLoop;
 
-    private sealed record Player(string Name, LineConnection Connection)
+    private sealed record Player(string Name, IConnection Connection)
     {
         /// <summary>
         /// Diventa true appena il benvenuto è in coda: da lì in poi riceve anche i messaggi diffusi a tutti.
@@ -119,6 +119,33 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     }
 
     public Pose? PoseOf(string name) => _poses.TryGetValue(name, out var pose) ? pose : null;
+
+    private void Track(Task session)
+    {
+        _sessions.TryAdd(session, 0);
+        _ = session.ContinueWith(t => _sessions.TryRemove(t, out _), TaskScheduler.Default);
+    }
+
+    private WebGateway? _web;
+    private Task? _webLoop;
+
+    /// <summary>
+    /// Apre anche la porta web: WebSocket su /ws per i giocatori nel browser (iPhone compreso) e,
+    /// se c'è <paramref name="webRoot"/>, i file del client web. Va chiamato dopo <see cref="Start"/>.
+    /// </summary>
+    public int StartWeb(IPAddress webAddress, int webPort, string? webRoot)
+    {
+        _web = new WebGateway(webAddress, webPort, (connection, ct) =>
+        {
+            var session = RunSessionAsync(connection, ct);
+            Track(session);
+            return session;
+        }, webRoot);
+        _webLoop = _web.StartAsync(_stopping.Token);
+        return _web.Port;
+    }
+
+    public int? WebPort => _web?.Port;
 
     public void Start()
     {
@@ -216,13 +243,11 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException) { break; }
             catch (SocketException) { continue; }
 
-            var session = RunSessionAsync(new LineConnection(tcp), ct);
-            _sessions.TryAdd(session, 0);
-            _ = session.ContinueWith(t => _sessions.TryRemove(t, out _), TaskScheduler.Default);
+            Track(RunSessionAsync(new LineConnection(tcp), ct));
         }
     }
 
-    private async Task RunSessionAsync(LineConnection connection, CancellationToken ct)
+    private async Task RunSessionAsync(IConnection connection, CancellationToken ct)
     {
         Player? player = null;
         try
@@ -258,7 +283,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         }
     }
 
-    private async Task<Player?> HandshakeAsync(LineConnection connection, CancellationToken ct)
+    private async Task<Player?> HandshakeAsync(IConnection connection, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(HelloTimeout);
@@ -605,6 +630,9 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         await Task.WhenAll(_players.Values.Select(p => p.Connection.FlushAsync(TimeSpan.FromSeconds(1))));
         await _stopping.CancelAsync();
         _listener.Stop();
+        _web?.Stop();
+        if (_webLoop is not null) await _webLoop;
+        _web?.Dispose();
         if (_ticker is not null) await _ticker;
         foreach (var player in _players.Values) player.Connection.Close();
         if (_acceptLoop is not null) await _acceptLoop;

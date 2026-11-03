@@ -1,6 +1,6 @@
 // Red3D.cs — Lex Arcana: rete e 3D in un solo file.
 // Generato da tools/GeneraRed3D.cs: non modificarlo a mano, modifica i sorgenti in src/ e rigeneralo.
-// Contiene 38 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
+// Contiene 41 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
 //
 // Avvio del client 3D: dotnet run --project Red3D -- --personaggio aurelia.json --host <indirizzo del Demiurgo>
 // Il server e gli strumenti (personaggi, campagne) sono nel progetto completo: src/LexArcana.
@@ -18,6 +18,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Net;
 using System.Numerics;
 using System.Reflection;
@@ -2120,7 +2121,7 @@ namespace LexArcana.Net
         private readonly CancellationTokenSource _stopping = new();
         private Task? _acceptLoop;
 
-        private sealed record Player(string Name, LineConnection Connection)
+        private sealed record Player(string Name, IConnection Connection)
         {
             /// <summary>
             /// Diventa true appena il benvenuto è in coda: da lì in poi riceve anche i messaggi diffusi a tutti.
@@ -2190,6 +2191,33 @@ namespace LexArcana.Net
         }
 
         public Pose? PoseOf(string name) => _poses.TryGetValue(name, out var pose) ? pose : null;
+
+        private void Track(Task session)
+        {
+            _sessions.TryAdd(session, 0);
+            _ = session.ContinueWith(t => _sessions.TryRemove(t, out _), TaskScheduler.Default);
+        }
+
+        private WebGateway? _web;
+        private Task? _webLoop;
+
+        /// <summary>
+        /// Apre anche la porta web: WebSocket su /ws per i giocatori nel browser (iPhone compreso) e,
+        /// se c'è <paramref name="webRoot"/>, i file del client web. Va chiamato dopo <see cref="Start"/>.
+        /// </summary>
+        public int StartWeb(IPAddress webAddress, int webPort, string? webRoot)
+        {
+            _web = new WebGateway(webAddress, webPort, (connection, ct) =>
+            {
+                var session = RunSessionAsync(connection, ct);
+                Track(session);
+                return session;
+            }, webRoot);
+            _webLoop = _web.StartAsync(_stopping.Token);
+            return _web.Port;
+        }
+
+        public int? WebPort => _web?.Port;
 
         public void Start()
         {
@@ -2287,13 +2315,11 @@ namespace LexArcana.Net
                 catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException) { break; }
                 catch (SocketException) { continue; }
 
-                var session = RunSessionAsync(new LineConnection(tcp), ct);
-                _sessions.TryAdd(session, 0);
-                _ = session.ContinueWith(t => _sessions.TryRemove(t, out _), TaskScheduler.Default);
+                Track(RunSessionAsync(new LineConnection(tcp), ct));
             }
         }
 
-        private async Task RunSessionAsync(LineConnection connection, CancellationToken ct)
+        private async Task RunSessionAsync(IConnection connection, CancellationToken ct)
         {
             Player? player = null;
             try
@@ -2329,7 +2355,7 @@ namespace LexArcana.Net
             }
         }
 
-        private async Task<Player?> HandshakeAsync(LineConnection connection, CancellationToken ct)
+        private async Task<Player?> HandshakeAsync(IConnection connection, CancellationToken ct)
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(HelloTimeout);
@@ -2676,12 +2702,37 @@ namespace LexArcana.Net
             await Task.WhenAll(_players.Values.Select(p => p.Connection.FlushAsync(TimeSpan.FromSeconds(1))));
             await _stopping.CancelAsync();
             _listener.Stop();
+            _web?.Stop();
+            if (_webLoop is not null) await _webLoop;
+            _web?.Dispose();
             if (_ticker is not null) await _ticker;
             foreach (var player in _players.Values) player.Connection.Close();
             if (_acceptLoop is not null) await _acceptLoop;
             await Task.WhenAll(_sessions.Keys);
             _stopping.Dispose();
         }
+    }
+}
+
+// ===== src/LexArcana.Core/Net/IConnection.cs =====
+namespace LexArcana.Net
+{
+    /// <summary>
+    /// Un canale di messaggi testuali verso un client: una riga JSON per messaggio.
+    /// Lo implementano la connessione TCP (<see cref="LineConnection"/>) e quella WebSocket dei browser (<see cref="WebSocketConnection"/>).
+    /// </summary>
+    public interface IConnection : IAsyncDisposable
+    {
+        string RemoteEndPoint { get; }
+        /// <summary>Si attiva quando la connessione si chiude, da qualunque lato.</summary>
+        CancellationToken Closed { get; }
+        /// <summary>Mette in coda un messaggio; false se la connessione è chiusa o l'altro capo non legge più.</summary>
+        bool Post(string line);
+        /// <summary>Attende che i messaggi in coda siano partiti (o che la connessione si chiuda).</summary>
+        Task FlushAsync(TimeSpan timeout);
+        /// <summary>Il prossimo messaggio, o null quando l'altro capo chiude.</summary>
+        Task<string?> ReadLineAsync(CancellationToken ct);
+        void Close();
     }
 }
 
@@ -2696,7 +2747,7 @@ namespace LexArcana.Net
     /// non legge, la connessione si chiude invece di rallentare tutti gli altri.</item>
     /// </list>
     /// </summary>
-    public sealed class LineConnection : IAsyncDisposable
+    public sealed class LineConnection : IConnection
     {
         public const int MaxLineBytes = 16 * 1024;
         public const int MaxQueuedLines = 512;
@@ -2857,6 +2908,267 @@ namespace LexArcana.Net
                 "esci" => new PlayerInput.Quit(),
                 _ => new PlayerInput.Invalid($"Comando sconosciuto: /{command}. Scrivi /aiuto."),
             };
+        }
+    }
+}
+
+// ===== src/LexArcana.Core/Net/WebGateway.cs =====
+namespace LexArcana.Net
+{
+    /// <summary>
+    /// La porta web del server: su <c>/ws</c> accetta i giocatori via WebSocket (browser, iPhone), sul resto
+    /// serve i file del client web da una cartella. Un piccolo server HTTP/1.1 fatto apposta: solo GET,
+    /// intestazioni al massimo di 8 KB, nessun percorso fuori dalla cartella.
+    /// </summary>
+    public sealed class WebGateway(IPAddress address, int port, Func<IConnection, CancellationToken, Task> acceptPlayer, string? webRoot) : IDisposable
+    {
+        public const int MaxHeaderBytes = 8 * 1024;
+        private const string WebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+        private readonly TcpListener _listener = new(address, port);
+        private readonly string? _root = webRoot is null ? null : Path.GetFullPath(webRoot);
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+        public Task StartAsync(CancellationToken ct)
+        {
+            _listener.Start();
+            return AcceptLoopAsync(ct);
+        }
+
+        public void Stop() => _listener.Stop();
+
+        public void Dispose() => _listener.Dispose();
+
+        private async Task AcceptLoopAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                TcpClient tcp;
+                try { tcp = await _listener.AcceptTcpClientAsync(ct); }
+                catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException) { break; }
+                catch (SocketException) { continue; }
+                _ = HandleAsync(tcp, ct);
+            }
+        }
+
+        private async Task HandleAsync(TcpClient tcp, CancellationToken ct)
+        {
+            bool handedOver = false;
+            try
+            {
+                tcp.NoDelay = true;
+                var stream = tcp.GetStream();
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(10));
+                var request = await ReadRequestAsync(stream, timeout.Token);
+                if (request is null) return;
+                var (method, path, headers) = request.Value;
+
+                if (method != "GET") { await RespondAsync(stream, 405, "text/plain", "Solo GET."u8.ToArray(), ct); return; }
+
+                if (path == "/ws")
+                {
+                    if (!headers.TryGetValue("sec-websocket-key", out var key) ||
+                        !headers.GetValueOrDefault("upgrade", "").Equals("websocket", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await RespondAsync(stream, 400, "text/plain", "Serve una richiesta WebSocket."u8.ToArray(), ct);
+                        return;
+                    }
+                    // SHA-1 qui non protegge nulla: è il calcolo fisso che RFC 6455 impone per accettare l'handshake.
+    #pragma warning disable CA5350
+                    var accept = Convert.ToBase64String(SHA1.HashData(Encoding.ASCII.GetBytes(key.Trim() + WebSocketGuid)));
+    #pragma warning restore CA5350
+                    var reply = $"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n";
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes(reply), ct);
+                    var socket = WebSocket.CreateFromStream(stream, new WebSocketCreationOptions { IsServer = true, KeepAliveInterval = TimeSpan.FromSeconds(20) });
+                    handedOver = true;
+                    await acceptPlayer(new WebSocketConnection(socket, tcp.Client.RemoteEndPoint?.ToString() ?? "?"), ct);
+                    return;
+                }
+
+                await ServeFileAsync(stream, path, ct);
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or SocketException or ObjectDisposedException or WebSocketException)
+            {
+            }
+            finally
+            {
+                if (!handedOver) tcp.Dispose();
+            }
+        }
+
+        private async Task ServeFileAsync(NetworkStream stream, string path, CancellationToken ct)
+        {
+            if (_root is null)
+            {
+                await RespondAsync(stream, 404, "text/plain; charset=utf-8", "Questo server non ha il client web: avvialo con --web <cartella>."u8.ToArray(), ct);
+                return;
+            }
+            var relative = Uri.UnescapeDataString(path.Split('?', 2)[0]).TrimStart('/');
+            if (relative.Length == 0 || relative.EndsWith('/')) relative += "index.html";
+            var full = Path.GetFullPath(Path.Combine(_root, relative));
+            bool inside = full.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+            if (!inside || relative.Split('/').Any(s => s.StartsWith('.')) || !File.Exists(full))
+            {
+                await RespondAsync(stream, 404, "text/plain; charset=utf-8", "Non trovato."u8.ToArray(), ct);
+                return;
+            }
+            await RespondAsync(stream, 200, ContentType(full), await File.ReadAllBytesAsync(full, ct), ct);
+        }
+
+        public static string ContentType(string file) => Path.GetExtension(file).ToLowerInvariant() switch
+        {
+            ".html" => "text/html; charset=utf-8",
+            ".js" or ".mjs" => "text/javascript; charset=utf-8",
+            ".css" => "text/css; charset=utf-8",
+            ".json" => "application/json",
+            ".wasm" => "application/wasm",
+            ".png" => "image/png",
+            ".svg" => "image/svg+xml",
+            ".ttf" => "font/ttf",
+            ".ico" => "image/x-icon",
+            ".webmanifest" => "application/manifest+json",
+            _ => "application/octet-stream",
+        };
+
+        private static async Task RespondAsync(NetworkStream stream, int status, string type, byte[] body, CancellationToken ct)
+        {
+            string reason = status switch { 200 => "OK", 400 => "Bad Request", 404 => "Not Found", 405 => "Method Not Allowed", _ => "Error" };
+            var head = $"HTTP/1.1 {status} {reason}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\n" +
+                       "Cache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(head), ct);
+            await stream.WriteAsync(body, ct);
+        }
+
+        /// <summary>Legge la riga di richiesta e le intestazioni (nomi in minuscolo). Null se la richiesta è malformata o troppo lunga.</summary>
+        private static async Task<(string Method, string Path, Dictionary<string, string> Headers)?> ReadRequestAsync(NetworkStream stream, CancellationToken ct)
+        {
+            var buffer = new byte[MaxHeaderBytes];
+            int length = 0;
+            while (true)
+            {
+                if (length == buffer.Length) return null;
+                int read = await stream.ReadAsync(buffer.AsMemory(length), ct);
+                if (read == 0) return null;
+                length += read;
+                int end = buffer.AsSpan(0, length).IndexOf("\r\n\r\n"u8);
+                if (end < 0) continue;
+                // si legge solo fino alla fine delle intestazioni: per un GET non c'è altro, e un WebSocket comincia dopo la risposta 101
+                var lines = Encoding.ASCII.GetString(buffer, 0, end).Split("\r\n");
+                var first = lines[0].Split(' ');
+                if (first.Length != 3 || !first[2].StartsWith("HTTP/1.", StringComparison.Ordinal)) return null;
+                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var line in lines.Skip(1))
+                {
+                    int colon = line.IndexOf(':', StringComparison.Ordinal);
+                    if (colon > 0) headers[line[..colon].Trim()] = line[(colon + 1)..].Trim();
+                }
+                return (first[0], first[1], headers);
+            }
+        }
+    }
+}
+
+// ===== src/LexArcana.Core/Net/WebSocketConnection.cs =====
+namespace LexArcana.Net
+{
+    /// <summary>
+    /// Una connessione WebSocket dal browser (per esempio Safari su iPhone): ogni messaggio di testo è un messaggio JSON.
+    /// Stessi limiti della connessione TCP: messaggi al massimo di <see cref="LineConnection.MaxLineBytes"/>
+    /// e una coda d'uscita che, se si riempie, chiude la connessione invece di rallentare gli altri.
+    /// </summary>
+    public sealed class WebSocketConnection : IConnection
+    {
+        private readonly WebSocket _socket;
+        private readonly Channel<string> _outbox = Channel.CreateBounded<string>(
+            new BoundedChannelOptions(LineConnection.MaxQueuedLines) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+        private readonly CancellationTokenSource _closed = new();
+        private readonly Task _writer;
+        private readonly byte[] _buffer = new byte[4096];
+
+        public WebSocketConnection(WebSocket socket, string remoteEndPoint)
+        {
+            _socket = socket;
+            RemoteEndPoint = remoteEndPoint;
+            _writer = WriteLoopAsync();
+        }
+
+        public string RemoteEndPoint { get; }
+        public CancellationToken Closed => _closed.Token;
+
+        public bool Post(string line)
+        {
+            if (_outbox.Writer.TryWrite(line)) return true;
+            Close();
+            return false;
+        }
+
+        public async Task FlushAsync(TimeSpan timeout)
+        {
+            _outbox.Writer.TryComplete();
+            try { await _writer.WaitAsync(timeout).ConfigureAwait(false); }
+            catch (TimeoutException) { }
+        }
+
+        public async Task<string?> ReadLineAsync(CancellationToken ct)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _closed.Token);
+            using var message = new MemoryStream();
+            while (true)
+            {
+                var result = await _socket.ReceiveAsync(_buffer, linked.Token).ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    // RFC 6455: a una richiesta di chiusura si risponde con la propria, poi si chiude.
+                    _outbox.Writer.TryComplete();
+                    await _writer.ConfigureAwait(false);
+                    return null;
+                }
+                if (result.MessageType != WebSocketMessageType.Text) throw new ProtocolException("Sono ammessi solo messaggi di testo.");
+                message.Write(_buffer, 0, result.Count);
+                if (message.Length > LineConnection.MaxLineBytes) throw new ProtocolException("Messaggio troppo lungo.");
+                if (!result.EndOfMessage) continue;
+                var text = Encoding.UTF8.GetString(message.GetBuffer(), 0, (int)message.Length).Trim();
+                if (text.Length > 0) return text;
+                message.SetLength(0);
+            }
+        }
+
+        private async Task WriteLoopAsync()
+        {
+            try
+            {
+                await foreach (var line in _outbox.Reader.ReadAllAsync(_closed.Token).ConfigureAwait(false))
+                    await _socket.SendAsync(Encoding.UTF8.GetBytes(line), WebSocketMessageType.Text, true, _closed.Token).ConfigureAwait(false);
+                if (_socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                    await _socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, timeout.Token).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException or IOException)
+            {
+            }
+            finally
+            {
+                Close();
+            }
+        }
+
+        public void Close()
+        {
+            _outbox.Writer.TryComplete();
+            try { _closed.Cancel(); } catch (ObjectDisposedException) { }
+            _socket.Abort();
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            Close();
+            await _writer.ConfigureAwait(false);
+            _socket.Dispose();
+            _closed.Dispose();
         }
     }
 }
