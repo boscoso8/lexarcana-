@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
+    <!-- Exe e non WinExe: su Windows resta una console, così gli errori di connessione si vedono. -->
+    <OutputType>Exe</OutputType>
     <AssemblyName>lexarcana-visione</AssemblyName>
     <RootNamespace>LexArcana.Visione</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
