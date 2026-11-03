@@ -2,6 +2,12 @@
 
   <!-- Compila Red3D.cs da solo: tutto il codice di rete e 3D in un file, più i font del client 3D. -->
   <PropertyGroup>
+    <!-- Tutto qui, senza dipendere dal Directory.Build.props del repository: il progetto si può copiare da solo. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
     <OutputType>Exe</OutputType>
     <AssemblyName>red3d</AssemblyName>
     <RootNamespace>LexArcana</RootNamespace>
