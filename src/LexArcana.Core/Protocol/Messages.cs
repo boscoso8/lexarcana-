@@ -21,6 +21,7 @@ namespace LexArcana.Protocol;
 [JsonDerivedType(typeof(SetSheet), "set_sheet")]
 [JsonDerivedType(typeof(Embody), "embody")]
 [JsonDerivedType(typeof(Attack), "attack")]
+[JsonDerivedType(typeof(Command), "command")]
 public abstract record ClientMessage;
 
 /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -42,6 +43,8 @@ public sealed record SetSheet(Dictionary<string, string> Fields) : ClientMessage
 public sealed record Embody(LexArcana.Characters.Character Character) : ClientMessage;
 /// <summary>Colpisce un nemico: in mischia, o a distanza con <see cref="Ranged"/>.</summary>
 public sealed record Attack(int EnemyId, bool Ranged = false) : ClientMessage;
+/// <summary>Un comando del Demiurgo che conduce da remoto, es. "/narra …" o "/avventura 2".</summary>
+public sealed record Command(string Line) : ClientMessage;
 
 /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]

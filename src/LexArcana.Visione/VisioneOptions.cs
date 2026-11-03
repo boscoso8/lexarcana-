@@ -17,7 +17,7 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
     public Func<double[]>? TouchPoints { get; init; }
 
     public const string Usage = """
-        lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
+        lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1 | --host https://tavolo.esempio.it] [--porta 7777] [--parola-d-ordine <testo>]
             Entra nella sessione di un Demiurgo e guarda il mondo con gli occhi del tuo personaggio.
             Il personaggio si crea con: lexarcana personaggio --nome <nome>
         lexarcana-visione --versione

@@ -55,6 +55,24 @@ public sealed class GameClient : IAsyncDisposable
         return await HelloAsync(new WebSocketConnection(socket, uri.ToString()), name, password, ct);
     }
 
+    /// <summary>
+    /// Si collega a un tavolo: con un indirizzo web (<c>https://tavolo.esempio.it</c>, <c>wss://…/ws</c>, <c>http://…</c>)
+    /// via WebSocket, come i browser; con un nome o un indirizzo IP via TCP sulla porta indicata.
+    /// </summary>
+    public static Task<GameClient> ConnectToAsync(string host, int port, string name, string? password = null, CancellationToken ct = default) =>
+        WebSocketUri(host) is { } uri ? ConnectWebSocketAsync(uri, name, password, ct) : ConnectAsync(host, port, name, password, ct);
+
+    /// <summary>L'indirizzo WebSocket di un tavolo online, o null se <paramref name="host"/> non è un indirizzo web.</summary>
+    public static Uri? WebSocketUri(string host)
+    {
+        if (!Uri.TryCreate(host, UriKind.Absolute, out var uri)) return null;
+        string? scheme = uri.Scheme switch { "https" or "wss" => "wss", "http" or "ws" => "ws", _ => null };
+        if (scheme is null) return null;
+        var builder = new UriBuilder(uri) { Scheme = scheme, Port = uri.IsDefaultPort ? -1 : uri.Port };
+        if (builder.Path is "" or "/") builder.Path = "/ws";
+        return builder.Uri;
+    }
+
     private static async Task<GameClient> HelloAsync(IConnection connection, string name, string? password, CancellationToken ct)
     {
         try

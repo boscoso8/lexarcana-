@@ -66,7 +66,7 @@ internal static class DemiurgeConsole
             }
             campaign = loaded;
         }
-        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map, campaign: campaign);
+        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map, campaign: campaign, demiurgePassword: options.DemiurgePassword);
         try
         {
             server.Start();

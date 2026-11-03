@@ -26,11 +26,16 @@ internal static class PlayerConsole
         GameClient client;
         try
         {
-            client = await GameClient.ConnectAsync(host, options.Port, name, options.Password, stop);
+            client = await GameClient.ConnectToAsync(host, options.Port, name, options.Password, stop);
         }
         catch (ConnectionRefusedException ex)
         {
             await Console.Error.WriteLineAsync(p.Pompeian("Il server ha rifiutato l'accesso: " + ex.Message));
+            return 1;
+        }
+        catch (Exception ex) when (ex is System.Net.WebSockets.WebSocketException or HttpRequestException)
+        {
+            await Console.Error.WriteLineAsync(p.Pompeian($"Impossibile collegarsi al tavolo {host}: {ex.Message}"));
             return 1;
         }
         catch (SocketException ex)
@@ -48,8 +53,16 @@ internal static class PlayerConsole
 
             using var session = CancellationTokenSource.CreateLinkedTokenSource(stop);
             var receiving = ReceiveAsync(client, renderer, p, session);
+            bool demiurge = LexArcana.Game.Names.IsDemiurge(client.Name);
+            if (demiurge) Terminal.WriteLine(p.Gilt("Conduci da remoto: ") + p.Muted("ogni riga è un comando del Demiurgo, /aiuto per l'elenco, /esci per lasciare."));
             await foreach (var line in Terminal.ReadLinesAsync(session.Token))
             {
+                if (demiurge)
+                {
+                    if (line.Trim() == "/esci") { await session.CancelAsync(); break; }
+                    if (line.Trim().Length > 0 && !client.Send(new Command(line))) await session.CancelAsync();
+                    continue;
+                }
                 switch (PlayerCommands.Parse(line))
                 {
                     case PlayerInput.Send(var message):

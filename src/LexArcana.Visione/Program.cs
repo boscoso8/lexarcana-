@@ -20,11 +20,16 @@ if (!VisioneOptions.TryParse(args, out var options, out var error))
 GameClient client;
 try
 {
-    client = GameClient.ConnectAsync(options.Host, options.Port, options.Name, options.Password).GetAwaiter().GetResult();
+    client = GameClient.ConnectToAsync(options.Host, options.Port, options.Name, options.Password).GetAwaiter().GetResult();
 }
 catch (ConnectionRefusedException ex)
 {
     Console.Error.WriteLine("Il server ha rifiutato l'accesso: " + ex.Message);
+    return 1;
+}
+catch (Exception ex) when (ex is System.Net.WebSockets.WebSocketException or HttpRequestException)
+{
+    Console.Error.WriteLine($"Impossibile collegarsi al tavolo {options.Host}: {ex.Message}");
     return 1;
 }
 catch (SocketException ex)

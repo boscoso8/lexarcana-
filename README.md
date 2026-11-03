@@ -260,6 +260,29 @@ Per controllare il rendering senza schermo (per esempio in CI), il client 3D pu�
 xvfb-run -s "-screen 0 1280x720x24" lexarcana-visione --nome Prova --cattura prova.png --dopo 3
 ```
 
+## Tavolo online
+
+Per giocare da internet, e non solo nella stessa rete, la cartella [`deploy`](deploy/LEGGIMI.md) contiene tutto il necessario:
+
+- un'immagine Docker con il server e il client web;
+- Caddy, che ottiene e rinnova da solo il certificato HTTPS.
+
+Si avvia con `docker compose up -d --build` e si gioca su `https://tavolo.esempio.it`. Tutti i client accettano un indirizzo web al posto di un IP:
+
+```bash
+lexarcana-visione --host https://tavolo.esempio.it --personaggio aurelia.json
+```
+
+![Un iPhone collegato al tavolo online: il Demiurgo remoto ha appena portato il gruppo al vecchio castrum](docs/online.png)
+
+Il Demiurgo può condurre anche da remoto. Il server va avviato con `--parola-demiurgo <testo>`; poi il Demiurgo si collega con:
+
+```bash
+lexarcana client --host https://tavolo.esempio.it --nome Demiurgo --parola-d-ordine <testo>
+```
+
+Da lì vede tutto quello che vedrebbe la console e può dare tutti i comandi.
+
 ## Red3D.cs: tutto in un file
 
 `Red3D/Red3D.cs` raccoglie in un solo file C# tutto il codice di rete e 3D: protocollo, server, client, mappe, campagne, personaggi, combattimento e client grafico. Serve per leggerlo o condividerlo con chi non vuole aprire l'intero progetto, e compila da solo:
@@ -276,4 +299,4 @@ dotnet run tools/GeneraRed3D.cs
 
 ## Sicurezza
 
-La connessione non è cifrata: la parola d'ordine e i messaggi viaggiano in chiaro. Usala in una rete fidata, o attraverso una VPN o un tunnel SSH. Il server tira tutti i dadi, controlla ogni spostamento (niente muri attraversati né teletrasporti), toglie i caratteri di controllo da ogni testo (niente sequenze ANSI verso i terminali degli altri) e chiude le connessioni che inviano righe troppo lunghe o non leggono i messaggi.
+La connessione TCP diretta (porta 7777) e la porta web senza HTTPS non sono cifrate: la parola d'ordine e i messaggi viaggiano in chiaro. Usale in una rete fidata. Per giocare da internet usa il tavolo online di [`deploy`](deploy/LEGGIMI.md), dove tutto passa da HTTPS e `wss://`. Il server tira tutti i dadi, controlla ogni spostamento (niente muri attraversati né teletrasporti), toglie i caratteri di controllo da ogni testo (niente sequenze ANSI verso i terminali degli altri) e chiude le connessioni che inviano righe troppo lunghe o non leggono i messaggi.
