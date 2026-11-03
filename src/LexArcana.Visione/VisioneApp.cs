@@ -13,7 +13,7 @@ namespace LexArcana.Visione;
 /// La rete gira su un altro thread e consegna i messaggi in una coda; tutto il resto
 /// (input, movimento, disegno) avviene sul thread della finestra.
 /// </summary>
-internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions options)
+internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneOptions options) : IDisposable
 {
     private const float EyeHeight = 1.6f, WalkSpeed = 3.2f, RunSpeed = 5.6f, MouseSensitivity = 0.0028f;
     private static readonly TimeSpan MoveInterval = TimeSpan.FromMilliseconds(100);
@@ -22,6 +22,10 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
     private readonly Dictionary<string, Avatar> _avatars = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _present = [];
     private readonly MessageRenderer _renderer = new(client.Name);
+    private GameMap _map = initialMap;
+    private World? _world;
+    private SheetShown? _mySheet;
+    private bool _showSheet = options.ShowSheet;
     private Pose _pose;
     private Pose _lastSent;
     private float _pitch;
@@ -49,6 +53,8 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
 
         using var network = new CancellationTokenSource();
         var receiving = Task.Run(() => ReceiveAsync(network.Token));
+        if (options.Character is { } character)
+            client.Send(new SetSheet(character.ToSheet().ToDictionary(f => f.Key, f => f.Value)));
 
         Raylib.SetConfigFlags(ConfigFlags.Msaa4xHint | ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint);
         Raylib.InitWindow(1280, 720, $"Lex Arcana · {client.Name}");
@@ -58,9 +64,9 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
 
         var assets = Path.Combine(AppContext.BaseDirectory, "Assets");
         using (var lighting = new Lighting())
-        using (var world = new World(map, lighting))
         using (var hud = new Hud(assets))
         {
+            _world = new World(_map, lighting);
             var start = Raylib.GetTime();
             hud.Add(_renderer.Render(welcome)!, 0);
             bool captured = false;
@@ -71,7 +77,8 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
                 double now = Raylib.GetTime() - start;
                 float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
 
-                Drain(hud, now);
+                Drain(hud, lighting, now);
+                var world = _world!;
                 HandleInput(hud, dt, now);
                 foreach (var avatar in _avatars.Values) avatar.Update(dt);
                 if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
@@ -94,7 +101,8 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
                 Raylib.EndMode3D();
 
                 DrawNameTags(hud, camera, eye, forward);
-                hud.DrawPlaceName(client.Welcome.Map.Name);
+                hud.DrawPlaceName(_map.Name);
+                if (_showSheet || Raylib.IsKeyDown(KeyboardKey.C) && !hud.Typing) hud.DrawSheet(_mySheet, options.Character);
                 if (_overlay is null && !hud.Typing && !_showHelp) Hud.DrawCrosshair();
                 hud.Draw(now, _showHelp, _present, _overlay);
                 Raylib.EndDrawing();
@@ -108,12 +116,19 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
                     _quit = true;
                 }
             }
+            Dispose(); // la scena va liberata finché la finestra e il contesto OpenGL esistono
         }
 
         Raylib.CloseWindow();
         network.Cancel();
         try { receiving.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { }
         return 0;
+    }
+
+    public void Dispose()
+    {
+        _world?.Dispose();
+        _world = null;
     }
 
     private async Task ReceiveAsync(CancellationToken ct)
@@ -130,12 +145,32 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
         }
     }
 
-    private void Drain(Hud hud, double now)
+    private void Drain(Hud hud, Lighting lighting, double now)
     {
         while (_inbox.TryDequeue(out var message))
         {
             switch (message)
             {
+                case MapChanged(var data, var positions, _):
+                    if (GameMap.TryParse([$"nome: {data.Name}", .. data.Rows], out var newMap, out var mapError))
+                    {
+                        _world?.Dispose();
+                        _map = newMap;
+                        _world = new World(newMap, lighting);
+                        _avatars.Clear();
+                        foreach (var p in positions)
+                        {
+                            var pose = new Pose(p.X, p.Z, p.Yaw);
+                            if (p.Name.IsSameName(client.Name)) { _pose = pose; _lastSent = pose; _pitch = 0; }
+                            else _avatars[p.Name] = new Avatar(p.Name, pose);
+                        }
+                    }
+                    else hud.Add(new StyledText().Add("! Il Demiurgo ha mandato una mappa non valida: " + mapError, Tone.Pompeian), now);
+                    break;
+                case SheetShown sheet when sheet.Owner.IsSameName(client.Name):
+                    _mySheet = sheet;
+                    if (sheet.UpdatedBy?.IsSameName(client.Name) == true) continue; // la propria compilazione non riempie la chat
+                    break;
                 case Moved(var name, var x, var z, var yaw) when name.IsSameName(client.Name):
                     _pose = new Pose(x, z, _pose.Yaw); // il server ha corretto una mossa non valida
                     _lastSent = _pose;
@@ -182,6 +217,7 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
         }
 
         if (Raylib.IsKeyPressed(KeyboardKey.F1)) _showHelp = _helpPinned = !_showHelp;
+        if (Raylib.IsKeyPressed(KeyboardKey.Tab) && Raylib.IsKeyDown(KeyboardKey.LeftShift)) _showSheet = !_showSheet;
         if (Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.T)) hud.OpenInput();
         else if (Raylib.IsKeyPressed(KeyboardKey.Slash)) hud.OpenInput("/");
         if (Raylib.IsKeyPressed(KeyboardKey.Escape))
@@ -218,7 +254,7 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
             float speed = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift) ? RunSpeed : WalkSpeed;
             move = Vector2.Normalize(move) * speed * dt;
         }
-        _pose = map.Slide(_pose, move.X, move.Y, yaw);
+        _pose = _map.Slide(_pose, move.X, move.Y, yaw);
     }
 
     private void Submit(Hud hud, string line, double now)
@@ -258,7 +294,7 @@ internal sealed class VisioneApp(GameClient client, GameMap map, VisioneOptions 
             var toHead = head - eye;
             float distance = toHead.Length();
             if (distance > 30 || Vector3.Dot(toHead, forward) <= 0.2f) continue;
-            if (!map.HasLineOfSight(eye.X, eye.Z, avatar.Position.X, avatar.Position.Y)) continue;
+            if (!_map.HasLineOfSight(eye.X, eye.Z, avatar.Position.X, avatar.Position.Y)) continue;
             hud.DrawNameTag(avatar.Name, Raylib.GetWorldToScreen(head, camera), distance);
         }
     }

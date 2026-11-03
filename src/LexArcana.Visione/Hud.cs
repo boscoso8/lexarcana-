@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Text;
 using System.Text.RegularExpressions;
 using Raylib_cs;
+using LexArcana.Protocol;
 using LexArcana.Ui;
 
 namespace LexArcana.Visione;
@@ -173,10 +174,38 @@ internal sealed partial class Hud : IDisposable
         }
     }
 
+    /// <summary>La scheda del proprio personaggio: quella del server se è arrivata, altrimenti quella del file.</summary>
+    public void DrawSheet(SheetShown? sheet, Characters.Character? character)
+    {
+        var fields = sheet?.Fields.Select(f => (f.Key, f.Value)).ToList()
+                     ?? character?.ToSheet().ToList()
+                     ?? [];
+        string title = sheet?.Owner ?? character?.Player ?? "";
+        int h = Raylib.GetScreenHeight();
+        float width = 460, x = Margin, y = 64;
+        float height = 70 + Math.Max(1, fields.Count) * 25 + 8;
+        Raylib.DrawRectangleRec(new(x, y, width, MathF.Min(height, h - y - 120)), Theme.WithAlpha(Theme.Panel, 230));
+        Raylib.DrawRectangleLinesEx(new(x, y, width, MathF.Min(height, h - y - 120)), 1, Theme.PanelEdge);
+        DrawCaps($"SCHEDA DI {title.ToUpperInvariant()}", new(x + 18, y + 16), 18, Theme.Of(Tone.Gilt));
+        float row = y + 52;
+        if (fields.Count == 0) DrawText("Ancora vuota: scrivi /imposta <campo> <valore>.", new(x + 18, row), 19, Theme.Of(Tone.Muted));
+        foreach (var (key, value) in fields)
+        {
+            if (row > h - 150) break;
+            DrawText(key, new(x + 18, row), 19, Theme.Of(Tone.Muted));
+            var lines = Wrap(new StyledText().Add(value), width - 170, 19);
+            foreach (var line in lines)
+            {
+                DrawLine(line, new(x + 150, row), 19, 255);
+                row += 25;
+            }
+        }
+    }
+
     private static readonly (string Keys, string What)[] Controls =
     [
         ("W A S D", "muoviti"), ("Maiusc", "corri"), ("Mouse", "guarda intorno"), ("Invio · T", "parla alla compagnia"),
-        ("/", "scrivi un comando, es. /tira d20"), ("Tab", "chi è presente"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
+        ("/", "scrivi un comando, es. /tira d20"), ("Tab", "chi è presente"), ("C", "la scheda del personaggio"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
     ];
 
     private void DrawHelp(int w, int h)

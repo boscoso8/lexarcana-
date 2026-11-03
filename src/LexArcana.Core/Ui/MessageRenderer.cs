@@ -49,6 +49,11 @@ public sealed class MessageRenderer(string viewer)
             case Expelled(var reason):
                 t.Add(reason.Sanitized is { Length: > 0 } r ? r : "Il Demiurgo ti ha allontanato dalla sessione.", Tone.Pompeian);
                 break;
+            case MapChanged(var map, _, var title):
+                t.Add("» Il gruppo raggiunge un nuovo luogo: ", Tone.Verdigris).Add(map.Name.Sanitized, Tone.Gilt, bold: true);
+                if (title is { Length: > 0 } && !title.Sanitized.EndsWith(map.Name.Sanitized, StringComparison.Ordinal))
+                    t.Add($" · {title.Sanitized}", Tone.Muted);
+                break;
             default:
                 return null; // Moved e simili: si vedono nella scena 3D, non nel testo
         }

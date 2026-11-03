@@ -183,6 +183,51 @@ public sealed class SessionTests
         Assert.All(livia.Welcome.Positions, p => Assert.True(GameMap.Default.IsWalkable(p.X, p.Z)));
     }
 
+    [Fact]
+    public async Task A_saved_character_fills_the_sheet_in_one_message()
+    {
+        var (server, demiurge) = StartServer();
+        await using var _s = server;
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+        var character = LexArcana.Characters.Character.Random("Livia", 11);
+        livia.Send(new SetSheet(character.ToSheet().ToDictionary(f => f.Key, f => f.Value)));
+        var sheet = await liviaInbox.NextAsync<SheetShown>();
+        Assert.Equal(character.ToSheet().Select(f => f.Key), sheet.Fields.Keys);
+        Assert.Equal(character.RomanName, (await demiurge.NextAsync<SheetShown>()).Fields["Nome"]);
+        Assert.False(await demiurge.SeesAsync<SheetShown>(TimeSpan.FromMilliseconds(200)));   // una volta sola
+
+        livia.Send(new SetSheet(Enumerable.Range(0, 50).ToDictionary(i => $"campo{i}", i => "x")));
+        Assert.IsType<Refused>(await liviaInbox.NextAsync<Refused>());
+        await livia.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task The_demiurge_moves_the_group_to_the_next_adventure()
+    {
+        var campaign = LexArcana.Campaigns.CampaignGenerator.Generate(5, 3);
+        var inbox = new Inbox();
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, campaign: campaign);
+        server.Start();
+        await using var _s = server;
+        Assert.IsType<Said>(server.StartAdventure(1));
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        Assert.Equal(campaign.Adventures[0].Place, marco.Welcome.Map.Name);
+
+        var brief = Assert.IsType<Said>(await server.ExecuteAsync("/avventura 2"));
+        Assert.Contains(campaign.Adventures[1].Objective, brief.Text, StringComparison.Ordinal);   // il promemoria resta al Demiurgo
+        var changed = await marcoInbox.NextAsync<MapChanged>();
+        Assert.Equal(campaign.Adventures[1].Place, changed.Map.Name);
+        Assert.Equal(campaign.Adventures[1].Map, changed.Map.Rows);
+        var me = Assert.Single(changed.Positions);
+        Assert.True(server.Map.IsWalkable(me.X, me.Z));
+        Assert.Contains(campaign.Adventures[1].Hook, (await marcoInbox.NextAsync<Narrated>()).Text, StringComparison.Ordinal);
+        Assert.False(await marcoInbox.SeesAsync<Said>(TimeSpan.FromMilliseconds(200)));           // e i giocatori non lo vedono
+
+        Assert.IsType<Refused>(await server.ExecuteAsync("/avventura 9"));
+        Assert.Contains("2.", Assert.IsType<Said>(await server.ExecuteAsync("/avventura")).Text, StringComparison.Ordinal);
+        await marco.DisposeAsync();
+    }
+
     [Theory]
     [InlineData("Marco", "già in uso")]
     [InlineData("demiurgo", "riservato")]

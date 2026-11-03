@@ -18,6 +18,7 @@ namespace LexArcana.Protocol;
 [JsonDerivedType(typeof(ListPlayers), "list_players")]
 [JsonDerivedType(typeof(Leave), "leave")]
 [JsonDerivedType(typeof(Move), "move")]
+[JsonDerivedType(typeof(SetSheet), "set_sheet")]
 public abstract record ClientMessage;
 
 /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -33,6 +34,8 @@ public sealed record ListPlayers : ClientMessage;
 public sealed record Leave : ClientMessage;
 /// <summary>Dove si trova e dove guarda il personaggio (client 3D, circa 10 volte al secondo).</summary>
 public sealed record Move(float X, float Z, float Yaw) : ClientMessage;
+/// <summary>Scrive molti campi della propria scheda in una volta, es. quando si entra con un personaggio salvato.</summary>
+public sealed record SetSheet(Dictionary<string, string> Fields) : ClientMessage;
 
 /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
@@ -48,6 +51,7 @@ public sealed record Move(float X, float Z, float Yaw) : ClientMessage;
 [JsonDerivedType(typeof(Refused), "refused")]
 [JsonDerivedType(typeof(Expelled), "expelled")]
 [JsonDerivedType(typeof(Moved), "moved")]
+[JsonDerivedType(typeof(MapChanged), "map_changed")]
 public abstract record ServerMessage;
 
 /// <summary>L'accoglienza: chi c'è, il luogo (righe della mappa) e dove si trova ognuno, te compreso.</summary>
@@ -69,3 +73,5 @@ public sealed record Refused(string Reason) : ServerMessage;
 public sealed record Expelled(string? Reason = null) : ServerMessage;
 /// <summary>Un personaggio si è spostato. Se riguarda te, è il server che corregge una mossa non valida.</summary>
 public sealed record Moved(string Name, float X, float Z, float Yaw) : ServerMessage;
+/// <summary>Il Demiurgo ha portato il gruppo in un altro luogo: nuova mappa, e tutti ripartono dai punti di partenza.</summary>
+public sealed record MapChanged(MapData Map, Position[] Positions, string? Title = null) : ServerMessage;

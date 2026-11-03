@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using LexArcana.Campaigns;
 using LexArcana.Game;
 using LexArcana.Protocol;
 
@@ -14,7 +15,7 @@ namespace LexArcana.Net;
 /// Il Demiurgo non è un client: vede ogni messaggio tramite <c>demiurgeView</c>, compresi
 /// sussurri e tiri segreti, e agisce con <see cref="ExecuteAsync"/>.
 /// </summary>
-public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null)
+public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null, Campaign? campaign = null)
     : IAsyncDisposable
 {
     public const int DefaultPort = 7777;
@@ -44,8 +45,49 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
 
     public string[] PlayerNames => [.. _players.Keys.Order(StringComparer.OrdinalIgnoreCase)];
 
-    /// <summary>Il luogo della sessione.</summary>
-    public GameMap Map { get; } = map ?? GameMap.Default;
+    private volatile GameMap _map = map ?? GameMap.Default;
+
+    /// <summary>Il luogo in cui si trova il gruppo; il Demiurgo lo cambia con /avventura.</summary>
+    public GameMap Map => _map;
+
+    /// <summary>La campagna caricata, se c'è, e l'avventura in corso (da 1).</summary>
+    public Campaign? Campaign { get; } = campaign;
+    public int AdventureNumber { get; private set; }
+
+    /// <summary>
+    /// Porta tutti in un altro luogo: i giocatori ripartono dai punti di partenza della nuova mappa
+    /// e i client 3D ricostruiscono la scena.
+    /// </summary>
+    public void ChangeMap(GameMap newMap, string? title = null)
+    {
+        _map = newMap;
+        int i = 0;
+        foreach (var name in PlayerNames) _poses[name] = newMap.Spawns[i++ % newMap.Spawns.Length];
+        Broadcast(new MapChanged(new MapData(newMap.Name, newMap.Rows), Positions(), title));
+    }
+
+    /// <summary>Comincia un'avventura della campagna: cambia luogo e narra il gancio a tutti.</summary>
+    public ServerMessage StartAdventure(int number)
+    {
+        if (Campaign is null) return new Refused("Nessuna campagna caricata: avvia il server con --campagna <file>.");
+        if (number < 1 || number > Campaign.Adventures.Length) return new Refused($"La campagna ha le avventure da 1 a {Campaign.Adventures.Length}.");
+        var adventure = Campaign.Adventures[number - 1];
+        if (!GameMap.TryParse([$"nome: {adventure.Place}", .. adventure.Map], out var adventureMap, out var error))
+            return new Refused($"La mappa dell'avventura {number} non è valida: {error}");
+        AdventureNumber = number;
+        var title = $"{number}. {adventure.Title}";
+        ChangeMap(adventureMap, title);
+        Broadcast(new Narrated($"{title}. {adventure.Hook}"));
+        return AdventureBrief(adventure);
+    }
+
+    /// <summary>Il promemoria privato del Demiurgo per un'avventura: obiettivo, PNG, complicazione, climax.</summary>
+    private static Said AdventureBrief(Adventure a)
+    {
+        var npcs = string.Join(" · ", a.Npcs.Select(n => $"{n.Name}, {n.Role} ({n.Trait}; segreto: {n.Secret})"));
+        return new Said(Names.Demiurge,
+            $"[solo per te] Obiettivo: {a.Objective} PNG: {npcs}. Complicazione: {a.Complication}. Climax: {a.Climax} Ricompensa: {a.Reward}.");
+    }
 
     public Pose? PoseOf(string name) => _poses.TryGetValue(name, out var pose) ? pose : null;
 
@@ -152,6 +194,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         RollDice(var expression, var secret) => RollFor(player.Name, expression, secret),
         Whisper(var to, var text) => WhisperFrom(player.Name, to, text),
         SetField(var key, var value) => SetSheetField(player.Name, player.Name, key, value),
+        SetSheet(var fields) => SetSheetFields(player.Name, fields),
         ShowSheet(var owner) => Sheet(owner ?? player.Name),
         ListPlayers => new PlayerList(Present()),
         Move(var x, var z, var yaw) => MoveTo(player, new Pose(x, z, yaw)),
@@ -204,6 +247,17 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         if (!sheet.TrySet(key, value, out var error)) return new Refused(error);
         var updated = new SheetShown(sheet.Owner, sheet.Snapshot(), actor);
         if (!Names.IsDemiurge(actor)) demiurgeView(updated);
+        return updated;
+    }
+
+    private ServerMessage SetSheetFields(string owner, Dictionary<string, string> fields)
+    {
+        var sheet = SheetOf(owner);
+        if (fields.Count > CharacterSheet.MaxFields) return new Refused($"Una scheda ha al massimo {CharacterSheet.MaxFields} campi.");
+        foreach (var (key, value) in fields)
+            if (!sheet.TrySet(key, value, out var error)) return new Refused($"{key.Sanitized}: {error}");
+        var updated = new SheetShown(sheet.Owner, sheet.Snapshot(), owner);
+        demiurgeView(updated);
         return updated;
     }
 
@@ -280,6 +334,17 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
                 return updated;
             case "chi":
                 return new PlayerList(Present());
+            case "avventura":
+                if (rest.Length == 0) return AdventureList();
+                return int.TryParse(rest, out var number) ? StartAdventure(number) : new Refused("Uso: /avventura <numero>");
+            case "mappa":
+                if (rest.Length == 0) return new Refused("Uso: /mappa <file>");
+                string[] lines;
+                try { lines = await File.ReadAllLinesAsync(rest); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return new Refused($"Impossibile leggere {rest}: {ex.Message}"); }
+                if (!GameMap.TryParse(lines, out var loaded, out var mapError)) return new Refused($"Mappa non valida: {mapError}");
+                ChangeMap(loaded, loaded.Name);
+                return null;
             case "espelli":
                 var (name, reason) = CommandLine.FirstWord(rest);
                 if (!_players.TryGetValue(name, out var expelled)) return new Refused($"«{name}» non è nella sessione.");
@@ -290,6 +355,14 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             default:
                 return new Refused($"Comando sconosciuto: /{command}. Scrivi /aiuto.");
         }
+    }
+
+    private ServerMessage AdventureList()
+    {
+        if (Campaign is null) return new Refused("Nessuna campagna caricata: avvia il server con --campagna <file>.");
+        var list = string.Join(" · ", Campaign.Adventures.Select(a =>
+            $"{(a.Number == AdventureNumber ? "▶ " : "")}{a.Number}. {a.Title} ({a.Place})"));
+        return new Said(Names.Demiurge, $"[solo per te] {Campaign.Title}: {list}. Scrivi /avventura <numero> per portarci il gruppo.");
     }
 
     // ---- Utilità

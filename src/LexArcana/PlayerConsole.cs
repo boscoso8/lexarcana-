@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using LexArcana.Characters;
 using LexArcana.Net;
 using LexArcana.Protocol;
 using LexArcana.Ui;
@@ -11,10 +12,21 @@ internal static class PlayerConsole
     public static async Task<int> RunAsync(Options options, Palette p, CancellationToken stop)
     {
         var host = options.Host ?? "127.0.0.1";
+        Character? character = null;
+        if (options.CharacterFile is { } file)
+        {
+            if (!CharacterFile.TryLoad(file, out var loaded, out var characterError))
+            {
+                await Console.Error.WriteLineAsync(p.Pompeian(characterError));
+                return 1;
+            }
+            character = loaded;
+        }
+        var name = options.Name ?? character!.Player;
         GameClient client;
         try
         {
-            client = await GameClient.ConnectAsync(host, options.Port, options.Name!, options.Password, stop);
+            client = await GameClient.ConnectAsync(host, options.Port, name, options.Password, stop);
         }
         catch (ConnectionRefusedException ex)
         {
@@ -31,6 +43,8 @@ internal static class PlayerConsole
         {
             var renderer = new MessageRenderer(client.Name);
             Terminal.WriteLine(p, renderer.Render(client.Welcome));
+            if (character is not null)
+                client.Send(new SetSheet(character.ToSheet().ToDictionary(f => f.Key, f => f.Value)));
 
             using var session = CancellationTokenSource.CreateLinkedTokenSource(stop);
             var receiving = ReceiveAsync(client, renderer, p, session);

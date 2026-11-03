@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using LexArcana.Campaigns;
 using LexArcana.Game;
 using LexArcana.Net;
 using LexArcana.Ui;
@@ -20,6 +21,8 @@ internal static class DemiurgeConsole
           /imposta <nome> <campo> [valore]   modifica la scheda di un giocatore
           /chi                               chi è presente
           /espelli <nome> [motivo]           allontana un giocatore
+          /avventura [numero]                elenca le avventure, o porta il gruppo in quella scelta
+          /mappa <file>                      porta il gruppo in un luogo da un file di mappa
           /fine                              chiudi la sessione
         Vedi anche tutti i sussurri e i tiri segreti dei giocatori.
         """;
@@ -44,7 +47,22 @@ internal static class DemiurgeConsole
                 return 1;
             }
         }
-        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map);
+        Campaign? campaign = null;
+        if (options.CampaignFile is { } campaignFile)
+        {
+            if (!CampaignFiles.TryLoad(campaignFile, out var loaded, out var campaignError))
+            {
+                await Console.Error.WriteLineAsync(p.Pompeian(campaignError));
+                return 1;
+            }
+            if (options.Adventure > loaded.Adventures.Length)
+            {
+                await Console.Error.WriteLineAsync(p.Pompeian($"La campagna ha solo {loaded.Adventures.Length} avventure."));
+                return 1;
+            }
+            campaign = loaded;
+        }
+        var server = new GameServer(address, options.Port, m => Terminal.WriteLine(p, renderer.Render(m)), options.Password, map: map, campaign: campaign);
         try
         {
             server.Start();
@@ -57,13 +75,19 @@ internal static class DemiurgeConsole
 
         await using (server)
         {
-            Terminal.WriteLine($"{p.Gilt(p.Bold("LEX ARCANA"))}{p.Muted($" · Sessione aperta nel luogo «{server.Map.Name}». Sei il Demiurgo.")}");
+            var where = campaign is null ? $"nel luogo «{server.Map.Name}»" : $"con la campagna «{campaign.Title}»";
+            Terminal.WriteLine($"{p.Gilt(p.Bold("LEX ARCANA"))}{p.Muted($" · Sessione aperta {where}. Sei il Demiurgo.")}");
             Terminal.WriteLine(p.Muted($"In ascolto su {address}:{server.Port}" +
                 (options.Password is null ? " · nessuna parola d'ordine" : " · con parola d'ordine")));
             Terminal.WriteLine(p.Muted("I giocatori si collegano con: ") +
                 p.Ink($"lexarcana client --host <indirizzo> --porta {server.Port} --nome <nome>") +
                 p.Muted(" (testo) oppure lexarcana-visione con gli stessi argomenti (3D)"));
             Terminal.WriteLine(p.Muted("Scrivi /aiuto per i comandi del Demiurgo."));
+            if (campaign is not null)
+            {
+                Terminal.WriteLine(p.Muted($"{campaign.Adventures.Length} avventure · /avventura per l'elenco · il manuale completo è campagna.md accanto al file della campagna"));
+                Terminal.WriteLine(p, renderer.Render(server.StartAdventure(options.Adventure)));
+            }
 
             using var done = CancellationTokenSource.CreateLinkedTokenSource(stop);
             await foreach (var line in Terminal.ReadLinesAsync(done.Token))

@@ -29,12 +29,13 @@ catch (SocketException ex)
 
 try
 {
-    if (!GameMap.TryParse(client.Welcome.Map.Rows, out var map, out var mapError))
+    if (!GameMap.TryParse([$"nome: {client.Welcome.Map.Name}", .. client.Welcome.Map.Rows], out var map, out var mapError))
     {
         Console.Error.WriteLine("Il server ha mandato una mappa non valida: " + mapError);
         return 1;
     }
-    return new VisioneApp(client, map, options).Run();
+    using var app = new VisioneApp(client, map, options);
+    return app.Run();
 }
 finally
 {

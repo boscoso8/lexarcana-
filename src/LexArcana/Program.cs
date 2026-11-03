@@ -22,6 +22,8 @@ return options.Mode switch
 {
     Mode.Server => await DemiurgeConsole.RunAsync(options, palette, stop.Token),
     Mode.Client => await PlayerConsole.RunAsync(options, palette, stop.Token),
+    Mode.Character => await CharacterConsole.RunAsync(options, palette, stop.Token),
+    Mode.Campaign => CampaignConsole.Run(options, palette),
     _ => ShowUsage(),
 };
 
