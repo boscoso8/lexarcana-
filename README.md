@@ -283,7 +283,16 @@ lexarcana client --host https://tavolo.esempio.it --nome Demiurgo --parola-d-ord
 
 Da lì vede tutto quello che vedrebbe la console e può dare tutti i comandi.
 
-## Red3D.cs: tutto in un file
+## Red3D.cs e LexArcana1.cs: il gioco in due file
+
+Per leggerlo o condividerlo senza aprire l'intero progetto, il gioco esiste anche in due file C#, ognuno con il suo progetto e compilabile da solo:
+
+- `LexArcana1/LexArcana1.cs`: server del Demiurgo, client da terminale, creatore di personaggi e generatore di campagne, con rete, combattimento e mappe. Non ha dipendenze esterne. Si avvia con `dotnet run --project LexArcana1 -- server --porta-web 8080`.
+- `Red3D/Red3D.cs`: il client 3D.
+
+Si rigenerano entrambi dai sorgenti con `dotnet run tools/GeneraRed3D.cs`.
+
+### Red3D.cs
 
 `Red3D/Red3D.cs` raccoglie in un solo file C# tutto il codice di rete e 3D: protocollo, server, client, mappe, campagne, personaggi, combattimento e client grafico. Serve per leggerlo o condividerlo con chi non vuole aprire l'intero progetto, e compila da solo:
 
@@ -291,7 +300,7 @@ Da lì vede tutto quello che vedrebbe la console e può dare tutti i comandi.
 dotnet run --project Red3D -- --personaggio aurelia.json --host 192.168.1.20
 ```
 
-Non va modificato a mano: si rigenera dai sorgenti in `src/` con l'app C# a file singolo di .NET 10:
+Come `LexArcana1.cs`, non va modificato a mano: si rigenera dai sorgenti in `src/` con l'app C# a file singolo di .NET 10:
 
 ```bash
 dotnet run tools/GeneraRed3D.cs

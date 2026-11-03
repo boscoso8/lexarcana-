@@ -3,7 +3,7 @@
 // Contiene 42 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
 //
 // Avvio del client 3D: dotnet run --project Red3D -- --personaggio aurelia.json --host <indirizzo del Demiurgo>
-// Il server e gli strumenti (personaggi, campagne) sono nel progetto completo: src/LexArcana.
+// Il server e gli strumenti (personaggi, campagne) sono in LexArcana1.cs.
 
 using LexArcana.Campaigns;
 using LexArcana.Characters;
