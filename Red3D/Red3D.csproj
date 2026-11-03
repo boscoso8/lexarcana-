@@ -14,8 +14,12 @@
     <PackageReference Include="Raylib-cs" Version="8.1.0" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- I font: dal repository se c'è, altrimenti da una cartella Assets accanto a questo file (es. D:\RED3D\Assets\Fonts). -->
+  <ItemGroup Condition="Exists('..\src\LexArcana.Visione\Assets')">
     <None Include="..\src\LexArcana.Visione\Assets\**\*" LinkBase="Assets" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\src\LexArcana.Visione\Assets')">
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
