@@ -1,0 +1,323 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Channels;
+using LexArcana.Game;
+using LexArcana.Net;
+using LexArcana.Protocol;
+
+namespace LexArcana.Tests;
+
+/// <summary>Sessioni vere su loopback: un server e client collegati via TCP.</summary>
+public sealed class SessionTests
+{
+    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(5);
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    /// <summary>Raccoglie i messaggi di un client o del Demiurgo per esaminarli in ordine.</summary>
+    private sealed class Inbox
+    {
+        private readonly Channel<ServerMessage> _messages = Channel.CreateUnbounded<ServerMessage>();
+        public void Add(ServerMessage m) => _messages.Writer.TryWrite(m);
+
+        public Task<T> NextAsync<T>() where T : ServerMessage => NextAsync<T>(Wait);
+
+        /// <summary>Il prossimo messaggio di tipo T, saltando gli altri.</summary>
+        public async Task<T> NextAsync<T>(TimeSpan within) where T : ServerMessage
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+            timeout.CancelAfter(within);
+            await foreach (var m in _messages.Reader.ReadAllAsync(timeout.Token))
+                if (m is T match) return match;
+            throw new InvalidOperationException();
+        }
+
+        /// <summary>True se arriva un messaggio di tipo T entro il tempo dato. Consuma i messaggi letti.</summary>
+        public async Task<bool> SeesAsync<T>(TimeSpan within) where T : ServerMessage
+        {
+            try
+            {
+                await NextAsync<T>(within);
+                return true;
+            }
+            catch (OperationCanceledException) when (!Ct.IsCancellationRequested) { return false; }
+        }
+    }
+
+    private static (GameServer Server, Inbox Demiurge) StartServer(string? password = null)
+    {
+        var inbox = new Inbox();
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, password, peaceful: true);
+        server.Start();
+        return (server, inbox);
+    }
+
+    private static async Task<(GameClient Client, Inbox Inbox)> JoinAsync(GameServer server, string name, string? password = null)
+    {
+        var client = await GameClient.ConnectAsync("127.0.0.1", server.Port, name, password, Ct);
+        var inbox = new Inbox();
+        _ = Task.Run(async () =>
+        {
+            await foreach (var m in client.ReadAllAsync(Ct)) inbox.Add(m);
+        }, Ct);
+        return (client, inbox);
+    }
+
+    [Fact]
+    public async Task Players_join_chat_and_see_public_rolls_made_by_the_server()
+    {
+        var (server, demiurge) = StartServer();
+        await using var _ = server;
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+        Assert.Equal("Livia", (await marcoInbox.NextAsync<Joined>()).Name);
+
+        marco.Send(new Say("Ave, Livia!"));
+        Assert.Equal(new Said("Marco", "Ave, Livia!"), await liviaInbox.NextAsync<Said>());
+        Assert.Equal("Ave, Livia!", (await demiurge.NextAsync<Said>()).Text);
+
+        livia.Send(new RollDice("3d6+1"));
+        var roll = await marcoInbox.NextAsync<Rolled>();
+        Assert.Equal("Livia", roll.From);
+        Assert.Equal(3, roll.Dice.Length);
+        Assert.Equal(roll.Dice.Sum() + 1, roll.Total);
+
+        await livia.DisposeAsync();
+        Assert.Equal("Livia", (await marcoInbox.NextAsync<Left>()).Name);
+        await marco.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Secret_rolls_and_whispers_reach_only_the_people_involved_and_the_demiurge()
+    {
+        var (server, demiurge) = StartServer();
+        await using var _ = server;
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+        var (aulo, auloInbox) = await JoinAsync(server, "Aulo");
+
+        marco.Send(new RollDice("d20", Secret: true));
+        Assert.True((await marcoInbox.NextAsync<Rolled>()).Secret);
+        Assert.Equal("Marco", (await demiurge.NextAsync<Rolled>()).From);
+
+        marco.Send(new Whisper("livia", "Fidati di me."));
+        Assert.Equal(new Whispered("Marco", "Livia", "Fidati di me."), await liviaInbox.NextAsync<Whispered>());
+        Assert.Equal("Livia", (await marcoInbox.NextAsync<Whispered>()).To);
+        Assert.Equal("Fidati di me.", (await demiurge.NextAsync<Whispered>()).Text);
+
+        Assert.False(await auloInbox.SeesAsync<Whispered>(TimeSpan.FromMilliseconds(400)));
+        Assert.False(await auloInbox.SeesAsync<Rolled>(TimeSpan.FromMilliseconds(200)));
+        Assert.False(await liviaInbox.SeesAsync<Rolled>(TimeSpan.FromMilliseconds(200)));
+
+        await Task.WhenAll(marco.DisposeAsync().AsTask(), livia.DisposeAsync().AsTask(), aulo.DisposeAsync().AsTask());
+    }
+
+    [Fact]
+    public async Task Demiurge_narrates_edits_sheets_rolls_in_secret_and_expels()
+    {
+        var (server, demiurge) = StartServer();
+        await using var _ = server;
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+
+        await server.ExecuteAsync("/narra Il tempio è avvolto nella nebbia.");
+        Assert.Equal("Il tempio è avvolto nella nebbia.", (await marcoInbox.NextAsync<Narrated>()).Text);
+
+        marco.Send(new SetField("Ferite", "0"));
+        Assert.Equal("0", (await marcoInbox.NextAsync<SheetShown>()).Fields["Ferite"]);
+
+        Assert.IsType<SheetShown>(await server.ExecuteAsync("/imposta marco Ferite 2"));
+        var pushed = await marcoInbox.NextAsync<SheetShown>();
+        Assert.Equal(("Demiurgo", "2"), (pushed.UpdatedBy, pushed.Fields["Ferite"]));
+
+        Assert.Null(await server.ExecuteAsync("/segreto 2d10"));
+        Assert.Equal("Demiurgo", (await demiurge.NextAsync<Rolled>()).From);
+        Assert.False(await marcoInbox.SeesAsync<Rolled>(TimeSpan.FromMilliseconds(300)));
+
+        Assert.IsType<Refused>(await server.ExecuteAsync("/tira 9d"));
+        Assert.IsType<Refused>(await server.ExecuteAsync("/volare"));
+
+        await server.ExecuteAsync("/espelli Marco disturbi la quiete");
+        Assert.Equal("disturbi la quiete", (await marcoInbox.NextAsync<Expelled>()).Reason);
+        Assert.Equal("Marco", (await demiurge.NextAsync<Left>()).Name);
+        await marco.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Positions_are_shared_and_impossible_moves_are_corrected()
+    {
+        var (server, _) = StartServer();
+        await using var _s = server;
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+
+        Assert.Equal("Livia", (await marcoInbox.NextAsync<Moved>()).Name); // dove è comparsa Livia
+        var start = server.PoseOf("Livia")!.Value;
+
+        // un passo valido arriva agli altri
+        livia.Send(new Move(start.X, start.Z - 0.5f, 1f));
+        var moved = await marcoInbox.NextAsync<Moved>();
+        Assert.Equal(("Livia", start.Z - 0.5f, 1f), (moved.Name, moved.Z, moved.Yaw));
+
+        // attraverso un muro o con un salto troppo lungo: il server rimanda la posizione buona e non la diffonde
+        livia.Send(new Move(-5f, start.Z, 0));
+        var corrected = await liviaInbox.NextAsync<Moved>();
+        Assert.Equal(("Livia", start.Z - 0.5f), (corrected.Name, corrected.Z));
+        livia.Send(new Move(start.X, start.Z - GameServer.MaxStep - 2f, 0));
+        Assert.Equal(start.Z - 0.5f, (await liviaInbox.NextAsync<Moved>()).Z);
+        Assert.False(await marcoInbox.SeesAsync<Moved>(TimeSpan.FromMilliseconds(300)));
+
+        await Task.WhenAll(marco.DisposeAsync().AsTask(), livia.DisposeAsync().AsTask());
+    }
+
+    [Fact]
+    public async Task Welcome_carries_the_map_and_everyone_s_position()
+    {
+        var (server, _) = StartServer();
+        await using var _s = server;
+        await using var marco = await GameClient.ConnectAsync("127.0.0.1", server.Port, "Marco", ct: Ct);
+        await using var livia = await GameClient.ConnectAsync("127.0.0.1", server.Port, "Livia", ct: Ct);
+
+        Assert.Equal("Tempio di Giano", livia.Welcome.Map.Name);
+        Assert.Equal(GameMap.Default.Rows, livia.Welcome.Map.Rows);
+        Assert.Equal(["Livia", "Marco"], livia.Welcome.Positions.Select(p => p.Name).Order());
+        Assert.All(livia.Welcome.Positions, p => Assert.True(GameMap.Default.IsWalkable(p.X, p.Z)));
+    }
+
+    [Fact]
+    public async Task Players_embody_their_character_see_the_enemies_and_fight_through_the_server()
+    {
+        var inbox = new Inbox();
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add);   // con i nemici
+        server.Start();
+        await using var _s = server;
+        Assert.NotEmpty(server.EnemySnapshot());
+
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+        var enemies = await liviaInbox.NextAsync<EnemyList>();
+        Assert.Equal(server.EnemySnapshot().Select(e => e.Id).Order(), enemies.Enemies.Select(e => e.Id).Order());
+        Assert.Equal(1, (await liviaInbox.NextAsync<Vitals>()).Level);
+
+        var character = LexArcana.Characters.Character.Random("Livia", 11) with { Experience = 300 };
+        livia.Send(new Embody(character));
+        var vitals = await liviaInbox.NextAsync<Vitals>();
+        Assert.Equal((3, character.Health + 6), (vitals.Level, vitals.MaxHealth));
+        Assert.Equal("3", (await liviaInbox.NextAsync<SheetShown>()).Fields["Livello"]);
+
+        livia.Send(new Embody(character with { BaseAttributes = LexArcana.Characters.Rules.Traits.ToDictionary(t => t, _ => 5) }));
+        Assert.Contains("regole", (await liviaInbox.NextAsync<Refused>()).Reason, StringComparison.Ordinal);
+
+        // dalla partenza i nemici sono lontani: un colpo in mischia viene rifiutato con il motivo
+        livia.Send(new Attack(enemies.Enemies[0].Id));
+        Assert.Contains("lontano", (await liviaInbox.NextAsync<Refused>()).Reason, StringComparison.Ordinal);
+
+        Assert.Null(await server.ExecuteAsync("/pace"));
+        Assert.Empty((await liviaInbox.NextAsync<EnemyList>()).Enemies);
+        Assert.Null(await server.ExecuteAsync("/evoca strige 4 capo"));
+        var summoned = Assert.Single((await liviaInbox.NextAsync<EnemyList>()).Enemies);
+        Assert.Equal(("strige", 4, "Elite"), (summoned.Kind, summoned.Level, summoned.Rank));
+        Assert.IsType<Refused>(await server.ExecuteAsync("/evoca drago"));
+        await livia.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task A_saved_character_fills_the_sheet_in_one_message()
+    {
+        var (server, demiurge) = StartServer();
+        await using var _s = server;
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+        var character = LexArcana.Characters.Character.Random("Livia", 11);
+        livia.Send(new SetSheet(character.ToSheet().ToDictionary(f => f.Key, f => f.Value)));
+        var sheet = await liviaInbox.NextAsync<SheetShown>();
+        Assert.Equal(character.ToSheet().Select(f => f.Key), sheet.Fields.Keys);
+        Assert.Equal(character.RomanName, (await demiurge.NextAsync<SheetShown>()).Fields["Nome"]);
+        Assert.False(await demiurge.SeesAsync<SheetShown>(TimeSpan.FromMilliseconds(200)));   // una volta sola
+
+        livia.Send(new SetSheet(Enumerable.Range(0, 50).ToDictionary(i => $"campo{i}", i => "x")));
+        Assert.IsType<Refused>(await liviaInbox.NextAsync<Refused>());
+        await livia.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task The_demiurge_moves_the_group_to_the_next_adventure()
+    {
+        var campaign = LexArcana.Campaigns.CampaignGenerator.Generate(5, 3);
+        var inbox = new Inbox();
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, campaign: campaign, peaceful: true);
+        server.Start();
+        await using var _s = server;
+        Assert.IsType<Said>(server.StartAdventure(1));
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        Assert.Equal(campaign.Adventures[0].Place, marco.Welcome.Map.Name);
+
+        var brief = Assert.IsType<Said>(await server.ExecuteAsync("/avventura 2"));
+        Assert.Contains(campaign.Adventures[1].Objective, brief.Text, StringComparison.Ordinal);   // il promemoria resta al Demiurgo
+        var changed = await marcoInbox.NextAsync<MapChanged>();
+        Assert.Equal(campaign.Adventures[1].Place, changed.Map.Name);
+        Assert.Equal(campaign.Adventures[1].Map, changed.Map.Rows);
+        var me = Assert.Single(changed.Positions);
+        Assert.True(server.Map.IsWalkable(me.X, me.Z));
+        Assert.Contains(campaign.Adventures[1].Hook, (await marcoInbox.NextAsync<Narrated>()).Text, StringComparison.Ordinal);
+        Assert.False(await marcoInbox.SeesAsync<Said>(TimeSpan.FromMilliseconds(200)));           // e i giocatori non lo vedono
+
+        Assert.IsType<Refused>(await server.ExecuteAsync("/avventura 9"));
+        Assert.Contains("2.", Assert.IsType<Said>(await server.ExecuteAsync("/avventura")).Text, StringComparison.Ordinal);
+        await marco.DisposeAsync();
+    }
+
+    [Theory]
+    [InlineData("Marco", "già in uso")]
+    [InlineData("demiurgo", "riservato")]
+    [InlineData("due parole", "nome")]
+    public async Task Refuses_bad_names(string name, string reason)
+    {
+        var (server, _) = StartServer();
+        await using var _s = server;
+        var (marco, _) = await JoinAsync(server, "Marco");
+        var ex = await Assert.ThrowsAsync<ConnectionRefusedException>(() => GameClient.ConnectAsync("127.0.0.1", server.Port, name, ct: Ct));
+        Assert.Contains(reason, ex.Message, StringComparison.Ordinal);
+        await marco.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Requires_the_password_when_one_is_set()
+    {
+        var (server, _) = StartServer(password: "ave");
+        await using var _s = server;
+        var ex = await Assert.ThrowsAsync<ConnectionRefusedException>(() => GameClient.ConnectAsync("127.0.0.1", server.Port, "Livia", "sbagliata", Ct));
+        Assert.Contains("Parola d'ordine", ex.Message, StringComparison.Ordinal);
+        await using var ok = await GameClient.ConnectAsync("127.0.0.1", server.Port, "Livia", "ave", Ct);
+        Assert.Equal("Livia", ok.Name);
+    }
+
+    [Fact]
+    public async Task Oversized_lines_close_the_connection_without_hurting_the_server()
+    {
+        var (server, _) = StartServer();
+        await using var _s = server;
+        using (var raw = new TcpClient())
+        {
+            await raw.ConnectAsync(IPAddress.Loopback, server.Port, Ct);
+            var stream = raw.GetStream();
+            try { await stream.WriteAsync(Encoding.UTF8.GetBytes(new string('x', LineConnection.MaxLineBytes * 2)), Ct); }
+            catch (IOException) { }
+            var reply = new byte[256];
+            int read;
+            try { read = await stream.ReadAsync(reply, Ct).AsTask().WaitAsync(Wait, Ct); }
+            catch (IOException) { read = 0; }
+            Assert.True(read == 0 || Encoding.UTF8.GetString(reply, 0, read).Contains("refused", StringComparison.Ordinal));
+        }
+
+        await using var marco = await GameClient.ConnectAsync("127.0.0.1", server.Port, "Marco", ct: Ct);
+        Assert.Contains("Marco", server.PlayerNames);
+    }
+
+    [Fact]
+    public async Task Closing_the_server_tells_every_player()
+    {
+        var (server, _) = StartServer();
+        var (marco, marcoInbox) = await JoinAsync(server, "Marco");
+        await server.DisposeAsync();
+        Assert.Contains("chiuso", (await marcoInbox.NextAsync<Expelled>()).Reason, StringComparison.Ordinal);
+        await marco.DisposeAsync();
+    }
+}

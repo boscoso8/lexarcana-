@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Compila Red3D.cs da solo: tutto il codice di rete e 3D in un file, più i font del client 3D. -->
+  <PropertyGroup>
+    <!-- Tutto qui, senza dipendere dal Directory.Build.props del repository: il progetto si può copiare da solo. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>red3d</AssemblyName>
+    <RootNamespace>LexArcana</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- ereditati dal repository: qui li si allenta, perché è una copia da leggere e condividere -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Raylib-cs" Version="8.1.0" />
+  </ItemGroup>
+
+  <!-- I font: dal repository se c'è, altrimenti da una cartella Assets accanto a questo file (es. D:\RED3D\Assets\Fonts). -->
+  <ItemGroup Condition="Exists('..\src\LexArcana.Visione\Assets')">
+    <None Include="..\src\LexArcana.Visione\Assets\**\*" LinkBase="Assets" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\src\LexArcana.Visione\Assets')">
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>lexarcana</AssemblyName>
+    <RootNamespace>LexArcana.App</RootNamespace>
+    <!-- dotnet publish produce un eseguibile nativo che non richiede .NET installato -->
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LexArcana.Core\LexArcana.Core.csproj" />
+  </ItemGroup>
+
+</Project>
