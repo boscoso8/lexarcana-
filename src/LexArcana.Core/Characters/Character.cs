@@ -21,6 +21,11 @@ public sealed record Character
     /// <summary>Le due abilità scelte oltre a quelle della vocazione.</summary>
     public required string[] ChosenSkills { get; init; }
     public string Concept { get; init; } = "";
+    /// <summary>L'esperienza accumulata giocando; il livello si ricava da qui (vedi <see cref="Combat.Progression"/>).</summary>
+    public int Experience { get; init; }
+
+    [JsonIgnore]
+    public int Level => Combat.Progression.LevelFor(Experience);
 
     [JsonIgnore]
     public Vocation VocationInfo => Rules.FindVocation(Vocation) ?? throw new InvalidOperationException($"Vocazione sconosciuta: {Vocation}");
@@ -59,6 +64,7 @@ public sealed record Character
         if (Rules.FindVocation(Vocation) is null) errors.Add($"Vocazione sconosciuta: {Vocation}.");
         if (Rules.FindOrigin(Origin) is null) errors.Add($"Origine sconosciuta: {Origin}.");
         if (Concept.Length > 160) errors.Add("Il concetto può avere al massimo 160 caratteri.");
+        if (Experience is < 0 or > 1_000_000) errors.Add("L'esperienza deve stare tra 0 e 1.000.000.");
 
         foreach (var a in Rules.Traits)
         {
@@ -80,6 +86,7 @@ public sealed record Character
     {
         yield return ("Nome", RomanName);
         yield return ("Vocazione", Vocation);
+        yield return ("Livello", Level.ToString(System.Globalization.CultureInfo.InvariantCulture));
         yield return ("Origine", $"{Origin} ({OriginInfo.Language})");
         foreach (var a in Rules.Traits) yield return (a.ToString(), this[a].ToString(System.Globalization.CultureInfo.InvariantCulture));
         yield return ("Salute", $"{Health}/{Health}");

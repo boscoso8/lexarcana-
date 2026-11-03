@@ -5,7 +5,7 @@ using LexArcana.Net;
 
 namespace LexArcana.Visione;
 
-internal sealed record VisioneOptions(string Host, int Port, string Name, string? Password, string? CapturePath, float CaptureAfter, (float X, float Z, float Yaw, float Pitch)? Frame = null, Character? Character = null, bool ShowSheet = false)
+internal sealed record VisioneOptions(string Host, int Port, string Name, string? Password, string? CapturePath, float CaptureAfter, (float X, float Z, float Yaw, float Pitch)? Frame = null, Character? Character = null, bool ShowSheet = false, string? CharacterPath = null, bool AutoFight = false)
 {
     public const string Usage = """
         lexarcana-visione --personaggio <file.json> | --nome <nome> [--host 127.0.0.1] [--porta 7777] [--parola-d-ordine <testo>]
@@ -17,6 +17,7 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
             --dopo <secondi>       quando scattare la cattura (predefinito 3)
             --inquadra x,z,yaw,pitch   con --cattura: guarda da questo punto (metri, radianti) senza muoversi in rete
             --mostra-scheda        tiene aperta la scheda del personaggio (come il tasto C)
+            --combatti             prova automatica: il personaggio va incontro al nemico più vicino e lo attacca
         """;
 
     public static bool TryParse(string[] args, out VisioneOptions options, out string error)
@@ -27,6 +28,8 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
         string? name = null, password = null, capture = null;
         Character? character = null;
         bool showSheet = false;
+        string? characterPath = null;
+        bool autoFight = false;
         int port = GameServer.DefaultPort;
         float after = 3f;
         (float, float, float, float)? frame = null;
@@ -43,7 +46,8 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
                     break;
                 case "--nome" or "-n": name = Value(); break;
                 case "--personaggio":
-                    if (!CharacterFile.TryLoad(Value() ?? "", out var loaded, out var characterError)) return Fail(characterError, out error);
+                    characterPath = Value() ?? "";
+                    if (!CharacterFile.TryLoad(characterPath, out var loaded, out var characterError)) return Fail(characterError, out error);
                     character = loaded;
                     break;
                 case "--parola-d-ordine": password = Value(); break;
@@ -53,6 +57,7 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
                         return Fail("--dopo vuole un numero di secondi tra 0 e 600.", out error);
                     break;
                 case "--mostra-scheda": showSheet = true; break;
+                case "--combatti": autoFight = true; break;
                 case "--inquadra":
                     var parts = (Value() ?? "").Split(',');
                     if (parts.Length != 4 || !parts.All(p => float.TryParse(p, CultureInfo.InvariantCulture, out _)))
@@ -70,7 +75,8 @@ internal sealed record VisioneOptions(string Host, int Port, string Name, string
         name ??= character?.Player;
         if (!Names.IsValid(name)) return Fail($"Serve --personaggio <file> oppure --nome (da 1 a {Names.MaxLength} lettere o cifre, senza spazi).", out error);
         if (frame is not null && capture is null) return Fail("--inquadra si usa solo insieme a --cattura.", out error);
-        options = new(host, port, name!, password, capture, after, frame, character, showSheet);
+        if (autoFight && frame is not null) return Fail("--combatti e --inquadra non si usano insieme.", out error);
+        options = new(host, port, name!, password, capture, after, frame, character, showSheet, characterPath, autoFight);
         return true;
 
         static bool Fail(string message, out string error)

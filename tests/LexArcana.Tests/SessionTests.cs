@@ -47,7 +47,7 @@ public sealed class SessionTests
     private static (GameServer Server, Inbox Demiurge) StartServer(string? password = null)
     {
         var inbox = new Inbox();
-        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, password);
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, password, peaceful: true);
         server.Start();
         return (server, inbox);
     }
@@ -184,6 +184,42 @@ public sealed class SessionTests
     }
 
     [Fact]
+    public async Task Players_embody_their_character_see_the_enemies_and_fight_through_the_server()
+    {
+        var inbox = new Inbox();
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add);   // con i nemici
+        server.Start();
+        await using var _s = server;
+        Assert.NotEmpty(server.EnemySnapshot());
+
+        var (livia, liviaInbox) = await JoinAsync(server, "Livia");
+        var enemies = await liviaInbox.NextAsync<EnemyList>();
+        Assert.Equal(server.EnemySnapshot().Select(e => e.Id).Order(), enemies.Enemies.Select(e => e.Id).Order());
+        Assert.Equal(1, (await liviaInbox.NextAsync<Vitals>()).Level);
+
+        var character = LexArcana.Characters.Character.Random("Livia", 11) with { Experience = 300 };
+        livia.Send(new Embody(character));
+        var vitals = await liviaInbox.NextAsync<Vitals>();
+        Assert.Equal((3, character.Health + 6), (vitals.Level, vitals.MaxHealth));
+        Assert.Equal("3", (await liviaInbox.NextAsync<SheetShown>()).Fields["Livello"]);
+
+        livia.Send(new Embody(character with { BaseAttributes = LexArcana.Characters.Rules.Traits.ToDictionary(t => t, _ => 5) }));
+        Assert.Contains("regole", (await liviaInbox.NextAsync<Refused>()).Reason, StringComparison.Ordinal);
+
+        // dalla partenza i nemici sono lontani: un colpo in mischia viene rifiutato con il motivo
+        livia.Send(new Attack(enemies.Enemies[0].Id));
+        Assert.Contains("lontano", (await liviaInbox.NextAsync<Refused>()).Reason, StringComparison.Ordinal);
+
+        Assert.Null(await server.ExecuteAsync("/pace"));
+        Assert.Empty((await liviaInbox.NextAsync<EnemyList>()).Enemies);
+        Assert.Null(await server.ExecuteAsync("/evoca strige 4 capo"));
+        var summoned = Assert.Single((await liviaInbox.NextAsync<EnemyList>()).Enemies);
+        Assert.Equal(("strige", 4, "Elite"), (summoned.Kind, summoned.Level, summoned.Rank));
+        Assert.IsType<Refused>(await server.ExecuteAsync("/evoca drago"));
+        await livia.DisposeAsync();
+    }
+
+    [Fact]
     public async Task A_saved_character_fills_the_sheet_in_one_message()
     {
         var (server, demiurge) = StartServer();
@@ -206,7 +242,7 @@ public sealed class SessionTests
     {
         var campaign = LexArcana.Campaigns.CampaignGenerator.Generate(5, 3);
         var inbox = new Inbox();
-        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, campaign: campaign);
+        var server = new GameServer(IPAddress.Loopback, 0, inbox.Add, campaign: campaign, peaceful: true);
         server.Start();
         await using var _s = server;
         Assert.IsType<Said>(server.StartAdventure(1));

@@ -19,6 +19,8 @@ namespace LexArcana.Protocol;
 [JsonDerivedType(typeof(Leave), "leave")]
 [JsonDerivedType(typeof(Move), "move")]
 [JsonDerivedType(typeof(SetSheet), "set_sheet")]
+[JsonDerivedType(typeof(Embody), "embody")]
+[JsonDerivedType(typeof(Attack), "attack")]
 public abstract record ClientMessage;
 
 /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -36,6 +38,10 @@ public sealed record Leave : ClientMessage;
 public sealed record Move(float X, float Z, float Yaw) : ClientMessage;
 /// <summary>Scrive molti campi della propria scheda in una volta, es. quando si entra con un personaggio salvato.</summary>
 public sealed record SetSheet(Dictionary<string, string> Fields) : ClientMessage;
+/// <summary>Entra in gioco con un personaggio salvato: compila la scheda e dà le statistiche di combattimento.</summary>
+public sealed record Embody(LexArcana.Characters.Character Character) : ClientMessage;
+/// <summary>Colpisce un nemico: in mischia, o a distanza con <see cref="Ranged"/>.</summary>
+public sealed record Attack(int EnemyId, bool Ranged = false) : ClientMessage;
 
 /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
@@ -52,6 +58,10 @@ public sealed record SetSheet(Dictionary<string, string> Fields) : ClientMessage
 [JsonDerivedType(typeof(Expelled), "expelled")]
 [JsonDerivedType(typeof(Moved), "moved")]
 [JsonDerivedType(typeof(MapChanged), "map_changed")]
+[JsonDerivedType(typeof(EnemyList), "enemies")]
+[JsonDerivedType(typeof(EnemyMoves), "enemy_moves")]
+[JsonDerivedType(typeof(Struck), "struck")]
+[JsonDerivedType(typeof(Vitals), "vitals")]
 public abstract record ServerMessage;
 
 /// <summary>L'accoglienza: chi c'è, il luogo (righe della mappa) e dove si trova ognuno, te compreso.</summary>
@@ -75,3 +85,22 @@ public sealed record Expelled(string? Reason = null) : ServerMessage;
 public sealed record Moved(string Name, float X, float Z, float Yaw) : ServerMessage;
 /// <summary>Il Demiurgo ha portato il gruppo in un altro luogo: nuova mappa, e tutti ripartono dai punti di partenza.</summary>
 public sealed record MapChanged(MapData Map, Position[] Positions, string? Title = null) : ServerMessage;
+
+/// <summary>Un nemico come lo vede un client: Kind è l'id del tipo nel bestiario (decide l'aspetto).</summary>
+public sealed record EnemyInfo(int Id, string Kind, string Name, int Level, int Health, int MaxHealth, float X, float Z, float Yaw, string Rank);
+public sealed record EnemyPose(int Id, float X, float Z, float Yaw);
+/// <summary>Tutti i nemici del luogo: sostituisce l'elenco precedente.</summary>
+public sealed record EnemyList(EnemyInfo[] Enemies) : ServerMessage;
+/// <summary>Gli spostamenti dei nemici dall'ultimo aggiornamento (circa 10 al secondo).</summary>
+public sealed record EnemyMoves(EnemyPose[] Poses) : ServerMessage;
+/// <summary>
+/// Un colpo. Attacker e Target sono nomi da mostrare; se l'uno o l'altro è un nemico, il suo id è in
+/// AttackerEnemyId o TargetEnemyId (null per i giocatori). Defeated dice se il bersaglio è caduto.
+/// </summary>
+public sealed record Struck(
+    string Attacker, string Target,
+    int Roll, int Total, int Against, bool Hit, bool Critical, int Damage,
+    int Health, int MaxHealth, bool Defeated, bool Ranged = false,
+    int? AttackerEnemyId = null, int? TargetEnemyId = null) : ServerMessage;
+/// <summary>Salute, livello ed esperienza di un giocatore.</summary>
+public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down) : ServerMessage;

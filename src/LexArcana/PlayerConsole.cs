@@ -44,7 +44,7 @@ internal static class PlayerConsole
             var renderer = new MessageRenderer(client.Name);
             Terminal.WriteLine(p, renderer.Render(client.Welcome));
             if (character is not null)
-                client.Send(new SetSheet(character.ToSheet().ToDictionary(f => f.Key, f => f.Value)));
+                client.Send(new Embody(character));
 
             using var session = CancellationTokenSource.CreateLinkedTokenSource(stop);
             var receiving = ReceiveAsync(client, renderer, p, session);

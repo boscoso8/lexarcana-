@@ -23,6 +23,10 @@ internal static class DemiurgeConsole
           /espelli <nome> [motivo]           allontana un giocatore
           /avventura [numero]                elenca le avventure, o porta il gruppo in quella scelta
           /mappa <file>                      porta il gruppo in un luogo da un file di mappa
+          /nemici                            elenca i nemici del luogo
+          /evoca <tipo> [livello] [capo]     fa comparire un nemico (tipi: cultista, ladro, lupo, lemure, scheletro, strige, custode)
+          /pace                              fa sparire tutti i nemici
+          /cura [nome]                       guarisce un giocatore, o tutto il gruppo
           /fine                              chiudi la sessione
         Vedi anche tutti i sussurri e i tiri segreti dei giocatori.
         """;

@@ -117,6 +117,152 @@ internal sealed unsafe class World : IDisposable
         Cylinder(p + new Vector3(0, 1.6f + bob, 0), 0.155f, 0.045f, Theme.Gilt);           // corona d'alloro
     }
 
+    /// <summary>Un nemico, disegnato secondo il suo tipo. Lampeggia di bianco se è appena stato colpito e affonda quando muore.</summary>
+    public void DrawEnemy(EnemyView e, double time)
+    {
+        float t = (float)time;
+        float dying = e.DiedAt is { } died ? (float)Math.Clamp((time - died) / 1.2, 0, 1) : 0;
+        float scale = e.Scale * (1f - dying * 0.4f);
+        var p = new Vector3(e.Position.X, -dying * 1.2f, e.Position.Y);
+        bool flash = time < e.FlashUntil;
+        Color C(Color c) => flash ? Theme.Marble : c;
+        float lunge = time - e.AttackAt < 0.35 ? MathF.Sin((float)(time - e.AttackAt) / 0.35f * MathF.PI) * 0.35f : 0f;
+        float bob = MathF.Abs(MathF.Sin(e.Phase)) * 0.06f * e.Stride;
+        var q = Quaternion.CreateFromAxisAngle(Vector3.UnitY, e.Yaw);
+        Vector3 L(float x, float y, float z) => p + Vector3.Transform(new Vector3(x, y, z + lunge) * scale, q);
+        void Part(Vector3 center, Vector3 size, Color color, Quaternion? extra = null) =>
+            Oriented(_cube, center, extra is { } r ? Quaternion.Concatenate(r, q) : q, size * scale, C(color));
+
+        switch (e.Kind)
+        {
+            case "lupo":
+            {
+                float gait = MathF.Sin(e.Phase * 2.2f) * 0.25f * e.Stride;
+                Part(L(0, 0.55f + bob, 0), new(0.38f, 0.42f, 0.95f), Theme.Basalt);
+                Part(L(0, 0.72f + bob, 0.6f), new(0.28f, 0.3f, 0.38f), Theme.Basalt);
+                Part(L(0, 0.66f + bob, 0.85f), new(0.16f, 0.14f, 0.22f), Theme.Basalt);          // muso
+                Part(L(0, 0.6f, -0.55f), new(0.08f, 0.08f, 0.4f), Theme.Basalt, Quaternion.CreateFromAxisAngle(Vector3.UnitX, -0.6f)); // coda
+                foreach (var (lx, lz, phase) in new[] { (0.14f, 0.32f, 1f), (-0.14f, 0.32f, -1f), (0.14f, -0.32f, -1f), (-0.14f, -0.32f, 1f) })
+                    Part(L(lx, 0.22f, lz + gait * phase), new(0.09f, 0.44f, 0.09f), Theme.Basalt);
+                _lighting.Emissive(true);
+                Sphere(L(0.08f, 0.8f + bob, 0.8f), 0.035f * scale, Theme.Flame);
+                Sphere(L(-0.08f, 0.8f + bob, 0.8f), 0.035f * scale, Theme.Flame);
+                _lighting.Emissive(false);
+                break;
+            }
+            case "strige":
+            {
+                float hover = 1.7f + MathF.Sin(t * 2.1f + e.Id) * 0.15f;
+                float flap = MathF.Sin(t * 14f + e.Id) * 0.7f;
+                Sphere(L(0, hover, 0), 0.22f * scale, C(Theme.Basalt));
+                Sphere(L(0, hover + 0.25f, 0.12f), 0.14f * scale, C(Theme.Marble));                // volto pallido
+                Part(L(0.38f, hover + 0.05f, 0), new(0.6f, 0.03f, 0.3f), Theme.Fresco, Quaternion.CreateFromAxisAngle(Vector3.UnitZ, flap));
+                Part(L(-0.38f, hover + 0.05f, 0), new(0.6f, 0.03f, 0.3f), Theme.Fresco, Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -flap));
+                Part(L(0.06f, hover - 0.28f, 0.05f), new(0.04f, 0.18f, 0.04f), Theme.Gilt);       // artigli di bronzo
+                Part(L(-0.06f, hover - 0.28f, 0.05f), new(0.04f, 0.18f, 0.04f), Theme.Gilt);
+                break;
+            }
+            case "scheletro":
+            {
+                float gait = MathF.Sin(e.Phase * 2f) * 0.2f * e.Stride;
+                Part(L(0.12f, 0.45f, gait), new(0.07f, 0.9f, 0.07f), Theme.Marble);
+                Part(L(-0.12f, 0.45f, -gait), new(0.07f, 0.9f, 0.07f), Theme.Marble);
+                Part(L(0, 1.25f + bob, 0), new(0.4f, 0.55f, 0.18f), Theme.Marble);              // costole
+                Part(L(0, 0.98f + bob, 0), new(0.36f, 0.08f, 0.2f), Theme.Fresco);              // cintura rossa
+                Sphere(L(0, 1.72f + bob, 0), 0.15f * scale, C(Theme.Marble));
+                Part(L(0, 1.85f + bob, 0), new(0.34f, 0.08f, 0.34f), Theme.Gilt);               // elmo
+                Part(L(0, 1.98f + bob, 0), new(0.04f, 0.16f, 0.3f), Theme.Fresco);              // cresta
+                Part(L(-0.3f, 1.2f + bob, 0.18f), new(0.08f, 0.75f, 0.5f), Theme.Fresco);       // scudo
+                Part(L(0.28f, 1.2f + bob, 0.3f), new(0.05f, 0.05f, 0.7f), Theme.Marble);        // gladio
+                break;
+            }
+            case "lemure":
+            {
+                float hover = 0.25f + MathF.Sin(t * 1.6f + e.Id) * 0.1f;
+                _lighting.Emissive(true);
+                Cone(L(0, hover, 0), 0.4f * scale, 1.7f * scale, e.Yaw * 57.3f, C(Theme.WithAlpha(Theme.Marble, 200)));
+                Sphere(L(0, hover + 1.45f, 0), 0.19f * scale, C(Theme.WithAlpha(Theme.Marble, 220)));
+                _lighting.Emissive(false);
+                Part(L(0.07f, hover + 1.48f, 0.16f), new(0.05f, 0.07f, 0.03f), Theme.Basalt);
+                Part(L(-0.07f, hover + 1.48f, 0.16f), new(0.05f, 0.07f, 0.03f), Theme.Basalt);
+                Part(L(0, hover + 1.36f, 0.17f), new(0.09f, 0.03f, 0.02f), Theme.Basalt);
+                break;
+            }
+            case "custode":
+            {
+                var bronze = new Color((byte)0x9a, (byte)0x6a, (byte)0x2a, (byte)255);
+                float gait = MathF.Sin(e.Phase * 1.6f) * 0.15f * e.Stride;
+                Part(L(0.22f, 0.5f, gait), new(0.26f, 1.0f, 0.3f), bronze);
+                Part(L(-0.22f, 0.5f, -gait), new(0.26f, 1.0f, 0.3f), bronze);
+                Part(L(0, 1.45f + bob, 0), new(0.95f, 0.95f, 0.55f), bronze);
+                Part(L(0.62f, 1.35f + bob, lunge * 2), new(0.25f, 0.9f, 0.28f), bronze);
+                Part(L(-0.62f, 1.35f + bob, 0), new(0.25f, 0.9f, 0.28f), bronze);
+                Part(L(0, 2.15f + bob, 0), new(0.45f, 0.42f, 0.42f), bronze);
+                Part(L(0, 1.45f + bob, 0.29f), new(0.5f, 0.12f, 0.02f), Theme.Gilt);
+                _lighting.Emissive(true);
+                Part(L(0, 2.18f + bob, 0.22f), new(0.3f, 0.06f, 0.02f), Theme.Flame);           // occhi di brace
+                _lighting.Emissive(false);
+                break;
+            }
+            default: // cultista, ladro di tombe: figure incappucciate
+            {
+                bool thief = e.Kind == "ladro";
+                var robe = thief ? new Color((byte)0x5c, (byte)0x4d, (byte)0x40, (byte)255) : Theme.Basalt;
+                float h = thief ? 1.3f : 1.5f;
+                Cone(L(0, 0.05f + bob, 0), 0.36f * scale, h * scale, e.Yaw * 57.3f, C(robe));
+                Part(L(0, h - 0.25f + bob, 0), new(0.5f, 0.14f, 0.26f), robe);
+                Sphere(L(0, h + 0.02f + bob, 0), 0.17f * scale, C(thief ? robe : Theme.Fresco)); // cappuccio
+                Part(L(0, h + bob, 0.13f), new(0.18f, 0.12f, 0.03f), Theme.Night);              // il volto nell'ombra
+                Part(L(0.3f, h - 0.4f + bob, 0.25f), new(0.04f, 0.04f, 0.42f), Theme.Gilt,
+                    Quaternion.CreateFromAxisAngle(Vector3.UnitX, -1.2f * lunge * 3));           // falcetto o pugnale
+                break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// La spada in prima persona, davanti alla telecamera. <paramref name="swing"/> va da 0 a 1 durante un colpo.
+    /// </summary>
+    public void DrawWeapon(Vector3 eye, float yaw, float pitch, float swing, float sway)
+    {
+        var camera = Quaternion.Concatenate(Quaternion.CreateFromAxisAngle(Vector3.UnitX, -pitch), Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw));
+        // a riposo la lama è inclinata in avanti e verso sinistra; il colpo la porta da destra a sinistra
+        float sweep = swing > 0 ? MathF.Sin(swing * MathF.PI) : 0;
+        var local = Quaternion.Concatenate(
+            Quaternion.CreateFromAxisAngle(Vector3.UnitX, -0.55f + sweep * 0.9f),
+            Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.35f - (swing > 0 ? (swing * 1.9f - 0.5f) : 0)));
+        var q = Quaternion.Concatenate(local, camera);
+        Vector3 C(float x, float y, float z) => eye + Vector3.Transform(new Vector3(x, y, z), camera);
+        var hilt = C(-0.3f + sweep * 0.22f, -0.34f + MathF.Sin(sway) * 0.012f, 0.55f);
+        var along = Vector3.Transform(Vector3.UnitZ, q);
+        var steel = new Color((byte)0xd8, (byte)0xd2, (byte)0xc4, (byte)255);
+        Oriented(_cube, hilt + along * 0.3f, q, new(0.04f, 0.012f, 0.52f), steel);
+        Oriented(_cube, hilt + along * 0.02f, q, new(0.12f, 0.025f, 0.03f), Theme.Gilt);
+        Oriented(_cube, hilt - along * 0.07f, q, new(0.025f, 0.025f, 0.12f), Theme.Basalt);
+        Sphere(hilt - along * 0.14f, 0.022f, Theme.Gilt);
+    }
+
+    public void DrawShot(Shot shot, double time)
+    {
+        float k = (float)Math.Clamp((time - shot.Time) / 0.18, 0, 1);
+        var dir = Vector3.Normalize(shot.To - shot.From);
+        var at = Vector3.Lerp(shot.From, shot.To, k);
+        float yaw = MathF.Atan2(dir.X, dir.Z), pitch = MathF.Asin(Math.Clamp(dir.Y, -1, 1));
+        var q = Quaternion.Concatenate(Quaternion.CreateFromAxisAngle(Vector3.UnitX, -pitch), Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw));
+        Oriented(_cube, at, q, new(0.025f, 0.025f, 0.5f), Theme.Gilt);
+    }
+
+    /// <summary>Disegna un modello ruotato da un quaternione (raylib vuole asse e angolo).</summary>
+    private static void Oriented(Model model, Vector3 center, Quaternion q, Vector3 size, Color color)
+    {
+        q = Quaternion.Normalize(q);
+        if (q.W < 0) q = -q;
+        float angle = 2f * MathF.Acos(Math.Clamp(q.W, -1f, 1f));
+        float s = MathF.Sqrt(MathF.Max(0f, 1f - q.W * q.W));
+        var axis = s < 1e-4f ? Vector3.UnitY : new Vector3(q.X, q.Y, q.Z) / s;
+        Raylib.DrawModelEx(model, center, axis, angle * 180f / MathF.PI, size, color);
+    }
+
     private bool TouchesOpenSpace(int x, int z)
     {
         for (int dx = -1; dx <= 1; dx++)

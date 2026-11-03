@@ -54,13 +54,41 @@ public sealed class MessageRenderer(string viewer)
                 if (title is { Length: > 0 } && !title.Sanitized.EndsWith(map.Name.Sanitized, StringComparison.Ordinal))
                     t.Add($" · {title.Sanitized}", Tone.Muted);
                 break;
+            case Struck s:
+                Blow(t, s);
+                break;
+            case EnemyList(var enemies) when enemies.Length > 0:
+                t.Add($"† {enemies.Length} nemici nel luogo", Tone.Pompeian).Add(
+                    $" · livello {enemies.Min(e => e.Level)}–{enemies.Max(e => e.Level)}" +
+                    (enemies.FirstOrDefault(e => e.Rank == "Boss") is { } boss ? $" · li guida {boss.Name}" : ""), Tone.Muted);
+                break;
             default:
-                return null; // Moved e simili: si vedono nella scena 3D, non nel testo
+                return null; // Moved, EnemyMoves, Vitals: si vedono nella scena 3D, non nel testo: si vedono nella scena 3D, non nel testo
         }
         return t;
     }
 
     private bool IsViewer(string name) => name.IsSameName(viewer);
+
+    private void Blow(StyledText t, Struck s)
+    {
+        string who = IsViewer(s.Attacker) ? "Tu" : s.Attacker.Sanitized;
+        string whom = IsViewer(s.Target) ? "te" : s.Target.Sanitized;
+        var attackerTone = s.AttackerEnemyId is null ? Tone.Bronze : Tone.Pompeian;
+        t.Add("† ", Tone.Pompeian).Add(who, attackerTone, bold: true);
+        if (!s.Hit)
+        {
+            t.Add($" {(IsViewer(s.Attacker) ? "manchi" : "manca")} {whom}", Tone.Muted).Add($"  [{s.Roll}] {s.Total} contro {s.Against}", Tone.Muted);
+            return;
+        }
+        string verb = s.Ranged ? (IsViewer(s.Attacker) ? "trafiggi" : "trafigge") : (IsViewer(s.Attacker) ? "colpisci" : "colpisce");
+        t.Add($" {verb} {whom}", Tone.Ink);
+        if (s.Critical) t.Add(" con un colpo critico", Tone.Gilt, bold: true);
+        t.Add($"  [{s.Roll}] {s.Total} contro {s.Against}: ", Tone.Muted).Add($"{s.Damage} danni", Tone.Pompeian, bold: true)
+         .Add($" ({s.Health}/{s.MaxHealth})", Tone.Muted);
+        if (s.Defeated)
+            t.Add(s.TargetEnemyId is null ? (IsViewer(s.Target) ? " · sei a terra!" : $" · {whom} è a terra!") : $" · {whom} è sconfitto.", Tone.Gilt, bold: true);
+    }
 
     private static StyledText Speaker(StyledText t, string from) =>
         Names.IsDemiurge(from) ? t.Add(from + ":", Tone.Gilt, bold: true) : t.Add(from.Sanitized + ":", Tone.Bronze, bold: true);

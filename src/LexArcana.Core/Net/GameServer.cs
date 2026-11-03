@@ -3,7 +3,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Diagnostics;
 using LexArcana.Campaigns;
+using LexArcana.Combat;
 using LexArcana.Game;
 using LexArcana.Protocol;
 
@@ -15,7 +17,7 @@ namespace LexArcana.Net;
 /// Il Demiurgo non è un client: vede ogni messaggio tramite <c>demiurgeView</c>, compresi
 /// sussurri e tiri segreti, e agisce con <see cref="ExecuteAsync"/>.
 /// </summary>
-public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null, Campaign? campaign = null)
+public sealed class GameServer(IPAddress address, int port, Action<ServerMessage> demiurgeView, string? password = null, Dice? dice = null, GameMap? map = null, Campaign? campaign = null, bool peaceful = false)
     : IAsyncDisposable
 {
     public const int DefaultPort = 7777;
@@ -31,12 +33,30 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     private readonly ConcurrentDictionary<string, CharacterSheet> _sheets = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Pose> _poses = new(StringComparer.OrdinalIgnoreCase);
     private int _nextSpawn;
+
+    // Combattimento: il motore non è sicuro tra thread, quindi lo si tocca solo sotto questo lock.
+    private readonly Lock _combatLock = new();
+    private CombatEngine? _combatEngine;
+    private CombatEngine Combat => _combatEngine ??= new CombatEngine(_dice, Map);
+    /// <summary>I giocatori che si muovono nella scena 3D: solo loro possono essere visti e attaccati dai nemici.</summary>
+    private readonly ConcurrentDictionary<string, byte> _inWorld = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Stopwatch _clock = Stopwatch.StartNew();
+    private readonly Random _random = new();
+    private Task? _ticker;
+    public const int TicksPerSecond = 10;
+    private double Now => _clock.Elapsed.TotalSeconds;
     private readonly ConcurrentDictionary<Task, byte> _sessions = new();
     private readonly CancellationTokenSource _stopping = new();
     private Task? _acceptLoop;
 
     private sealed record Player(string Name, LineConnection Connection)
     {
+        /// <summary>
+        /// Diventa true appena il benvenuto è in coda: da lì in poi riceve anche i messaggi diffusi a tutti.
+        /// Prima, un messaggio diffuso potrebbe arrivargli prima del benvenuto e il client lo rifiuterebbe.
+        /// </summary>
+        public volatile bool Ready;
+
         public bool Send(ServerMessage message) => Connection.Post(Wire.Encode(message));
     }
 
@@ -58,12 +78,20 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     /// Porta tutti in un altro luogo: i giocatori ripartono dai punti di partenza della nuova mappa
     /// e i client 3D ricostruiscono la scena.
     /// </summary>
-    public void ChangeMap(GameMap newMap, string? title = null)
+    public void ChangeMap(GameMap newMap, string? title = null, PlaceKind? kind = null, int adventure = 1, bool final = false, string? boss = null)
     {
         _map = newMap;
         int i = 0;
         foreach (var name in PlayerNames) _poses[name] = newMap.Spawns[i++ % newMap.Spawns.Length];
+        EnemyList enemies;
+        lock (_combatLock)
+        {
+            Combat.Populate(newMap, kind, adventure, final, boss, _random);
+            if (peaceful) Combat.Clear();
+            enemies = new EnemyList([.. Combat.Enemies.Select(Info)]);
+        }
         Broadcast(new MapChanged(new MapData(newMap.Name, newMap.Rows), Positions(), title));
+        Broadcast(enemies);
     }
 
     /// <summary>Comincia un'avventura della campagna: cambia luogo e narra il gancio a tutti.</summary>
@@ -76,7 +104,8 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             return new Refused($"La mappa dell'avventura {number} non è valida: {error}");
         AdventureNumber = number;
         var title = $"{number}. {adventure.Title}";
-        ChangeMap(adventureMap, title);
+        bool final = number == Campaign.Adventures.Length;
+        ChangeMap(adventureMap, title, adventure.Kind, number, final, final ? Campaign.Villain.Split(',')[0] : null);
         Broadcast(new Narrated($"{title}. {adventure.Hook}"));
         return AdventureBrief(adventure);
     }
@@ -94,8 +123,89 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     public void Start()
     {
         _listener.Start();
+        if (AdventureNumber == 0 && !peaceful) lock (_combatLock) Combat.Populate(Map, null, 1, false, null, _random);
         _acceptLoop = AcceptLoopAsync(_stopping.Token);
+        _ticker = TickLoopAsync(_stopping.Token);
     }
+
+    /// <summary>Quanti nemici ci sono ora (per i test e per /nemici).</summary>
+    public IReadOnlyList<EnemyInfo> EnemySnapshot()
+    {
+        lock (_combatLock) return [.. Combat.Enemies.Select(Info)];
+    }
+
+    public Vitals? VitalsOf(string name)
+    {
+        lock (_combatLock) return Combat.FighterOf(name) is { } f ? ToVitals(f) : null;
+    }
+
+    private async Task TickLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1.0 / TicksPerSecond));
+        double last = Now;
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                double now = Now;
+                var players = _inWorld.Keys.Where(_poses.ContainsKey).ToDictionary(n => n, n => _poses[n], StringComparer.OrdinalIgnoreCase);
+                List<(ServerMessage, string?)> messages;
+                lock (_combatLock) messages = Translate(Combat.Tick(now, (float)Math.Min(now - last, 0.25), players));
+                last = now;
+                Publish(messages);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>
+    /// Traduce gli eventi del motore in messaggi: ogni coppia è (messaggio, destinatario); destinatario null = tutti.
+    /// Va chiamato sotto <see cref="_combatLock"/>, perché legge lo stato di nemici e combattenti.
+    /// </summary>
+    private List<(ServerMessage Message, string? To)> Translate(IEnumerable<CombatEvent> events)
+    {
+        List<(ServerMessage, string?)> messages = [];
+        foreach (var e in events)
+            switch (e)
+            {
+                case EnemiesChanged:
+                    messages.Add((new EnemyList([.. Combat.Enemies.Select(Info)]), null));
+                    break;
+                case EnemiesMoved(var enemies):
+                    messages.Add((new EnemyMoves([.. enemies.Select(x => new EnemyPose(x.Id, x.Pose.X, x.Pose.Z, x.Pose.Yaw))]), null));
+                    break;
+                case Blow b:
+                    messages.Add((new Struck(b.Attacker, b.Target, b.Roll, b.Total, b.Against, b.Hit, b.Critical, b.Damage,
+                        b.Health, b.MaxHealth, b.Defeated, b.Ranged, b.AttackerEnemyId, b.TargetEnemyId), null));
+                    break;
+                case VitalsChanged(var f):
+                    messages.Add((ToVitals(f), f.Name));
+                    break;
+                case LevelUp(var f):
+                    messages.Add((new Narrated($"{f.Name} sale al livello {f.Level}: salute piena, colpi più sicuri."), null));
+                    break;
+                case Respawned(var f, var pose):
+                    _poses[f.Name] = pose;
+                    messages.Add((new Moved(f.Name, pose.X, pose.Z, pose.Yaw), null));
+                    break;
+            }
+        return messages;
+    }
+
+    private void Publish(List<(ServerMessage Message, string? To)> messages)
+    {
+        foreach (var (message, to) in messages)
+        {
+            if (to is null) Broadcast(message);
+            else if (_players.TryGetValue(to, out var player) && player.Ready) player.Send(message);
+        }
+    }
+
+    private static EnemyInfo Info(Enemy e) =>
+        new(e.Id, e.Kind.Id, e.Name, e.Level, e.Health, e.MaxHealth, e.Pose.X, e.Pose.Z, e.Pose.Yaw, e.Rank.ToString());
+
+    private static Vitals ToVitals(Fighter f) =>
+        new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown);
 
     private async Task AcceptLoopAsync(CancellationToken ct)
     {
@@ -140,6 +250,8 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             if (player is not null && _players.TryRemove(new(player.Name, player)))
             {
                 _poses.TryRemove(player.Name, out _);
+                _inWorld.TryRemove(player.Name, out _);
+                lock (_combatLock) Combat.Leave(player.Name);
                 Broadcast(new Left(player.Name));
             }
             await connection.DisposeAsync();
@@ -170,11 +282,21 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         }
 
         SheetOf(player.Name);
+        Vitals vitals;
+        EnemyList enemyList;
+        lock (_combatLock)
+        {
+            vitals = ToVitals(Combat.Join(player.Name));
+            enemyList = new EnemyList([.. Combat.Enemies.Select(Info)]);
+        }
         var spawn = Map.Spawns[(int)((uint)Interlocked.Increment(ref _nextSpawn) % Map.Spawns.Length)];
         _poses[player.Name] = spawn;
         player.Send(new Welcome(player.Name, Present(), new MapData(Map.Name, Map.Rows), Positions()));
+        player.Ready = true;
         Broadcast(new Joined(player.Name), except: player.Name);
         Broadcast(new Moved(player.Name, spawn.X, spawn.Z, spawn.Yaw), except: player.Name);
+        player.Send(enemyList);
+        player.Send(vitals);
         return player;
 
         Player? Refuse(string reason)
@@ -195,6 +317,8 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         Whisper(var to, var text) => WhisperFrom(player.Name, to, text),
         SetField(var key, var value) => SetSheetField(player.Name, player.Name, key, value),
         SetSheet(var fields) => SetSheetFields(player.Name, fields),
+        Embody(var character) => EmbodyAs(player, character),
+        Attack(var enemyId, var ranged) => AttackWith(player, enemyId, ranged),
         ShowSheet(var owner) => Sheet(owner ?? player.Name),
         ListPlayers => new PlayerList(Present()),
         Move(var x, var z, var yaw) => MoveTo(player, new Pose(x, z, yaw)),
@@ -261,6 +385,30 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         return updated;
     }
 
+    /// <summary>Entra in gioco con un personaggio: lo controlla, compila la scheda e prepara il combattimento.</summary>
+    private ServerMessage EmbodyAs(Player player, Characters.Character character)
+    {
+        var problems = character.Validate();
+        if (problems.Count > 0) return new Refused("Il personaggio non rispetta le regole: " + string.Join(" ", problems));
+        var sheetReply = SetSheetFields(player.Name, character.ToSheet().ToDictionary(f => f.Key, f => f.Value));
+        Vitals vitals;
+        lock (_combatLock) vitals = ToVitals(Combat.Join(player.Name, character));
+        player.Send(vitals);
+        return sheetReply;
+    }
+
+    private Refused? AttackWith(Player player, int enemyId, bool ranged)
+    {
+        if (!_poses.TryGetValue(player.Name, out var pose)) return new Refused("Non sei nella scena.");
+        List<(ServerMessage, string?)> messages;
+        string? refusal;
+        lock (_combatLock) messages = Translate(Combat.Attack(player.Name, pose, enemyId, ranged, Now, out refusal));
+        Publish(messages);
+        if (messages.Any(m => m.Item1 is Struck { Defeated: true, TargetEnemyId: not null }))
+            lock (_combatLock) if (Combat.Enemies.Count == 0) Broadcast(new Narrated("Il luogo è libero: non resta nessun nemico."));
+        return refusal is null ? null : new Refused(refusal);
+    }
+
     private ServerMessage Sheet(string owner) =>
         _sheets.TryGetValue(owner, out var sheet)
             ? new SheetShown(sheet.Owner, sheet.Snapshot())
@@ -273,14 +421,18 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
     private Moved? MoveTo(Player player, Pose wanted)
     {
         var current = _poses.GetValueOrDefault(player.Name, Map.Spawns[0]);
+        bool down;
+        lock (_combatLock) down = Combat.FighterOf(player.Name)?.IsDown == true;
+        if (down) return new Moved(player.Name, current.X, current.Z, current.Yaw); // a terra non ci si muove
         if (!wanted.IsFinite || wanted.DistanceTo(current) > MaxStep || !Map.IsWalkable(wanted.X, wanted.Z))
             return new Moved(player.Name, current.X, current.Z, current.Yaw);
 
         var pose = wanted with { Yaw = NormalizeAngle(wanted.Yaw) };
         _poses[player.Name] = pose;
+        _inWorld.TryAdd(player.Name, 0);
         var moved = Wire.Encode(new Moved(player.Name, pose.X, pose.Z, pose.Yaw));
         foreach (var other in _players.Values)
-            if (other != player) other.Connection.Post(moved);
+            if (other != player && other.Ready) other.Connection.Post(moved);
         return null;
     }
 
@@ -337,6 +489,49 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
             case "avventura":
                 if (rest.Length == 0) return AdventureList();
                 return int.TryParse(rest, out var number) ? StartAdventure(number) : new Refused("Uso: /avventura <numero>");
+            case "nemici":
+            {
+                var list = EnemySnapshot();
+                return new Said(Names.Demiurge, list.Count == 0
+                    ? "[solo per te] Nessun nemico nel luogo. /evoca <tipo> [livello] per crearne; tipi: " + string.Join(", ", Bestiary.All.Select(k => k.Id)) + "."
+                    : "[solo per te] " + string.Join(" · ", list.Select(e => $"#{e.Id} {e.Name} liv. {e.Level} ({e.Health}/{e.MaxHealth})")));
+            }
+            case "evoca":
+            {
+                var (kindName, levelText) = CommandLine.FirstWord(rest);
+                if (Bestiary.Find(kindName) is not { } kind)
+                    return new Refused("Uso: /evoca <tipo> [livello] [capo]. Tipi: " + string.Join(", ", Bestiary.All.Select(k => k.Id)) + ".");
+                var (lvText, rankText) = CommandLine.FirstWord(levelText);
+                EnemyList list;
+                lock (_combatLock)
+                {
+                    int level = int.TryParse(lvText, out var l) ? l : Progression.EncounterLevel(Math.Max(1, AdventureNumber), Combat.PartyLevel);
+                    var rank = rankText.Equals("capo", StringComparison.OrdinalIgnoreCase) ? EnemyRank.Elite : EnemyRank.Normal;
+                    Combat.Summon(kind, level, rank, SummoningSpot());
+                    list = new EnemyList([.. Combat.Enemies.Select(Info)]);
+                }
+                Broadcast(list);
+                return null;
+            }
+            case "pace":
+                lock (_combatLock) Combat.Clear();
+                Broadcast(new EnemyList([]));
+                Broadcast(new Narrated("Cala il silenzio: i nemici svaniscono."));
+                return null;
+            case "cura":
+            {
+                List<(ServerMessage, string?)> messages = [];
+                lock (_combatLock)
+                    foreach (var f in Combat.Fighters.Where(f => rest.Length == 0 || f.Name.IsSameName(rest)))
+                    {
+                        f.Health = f.MaxHealth;
+                        messages.Add((ToVitals(f), f.Name));
+                    }
+                if (messages.Count == 0) return new Refused($"«{rest}» non è nella sessione.");
+                Publish(messages);
+                Broadcast(new Narrated(rest.Length == 0 ? "Una luce calda guarisce le ferite del gruppo." : $"Una luce calda guarisce le ferite di {rest}."));
+                return null;
+            }
             case "mappa":
                 if (rest.Length == 0) return new Refused("Uso: /mappa <file>");
                 string[] lines;
@@ -357,6 +552,31 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         }
     }
 
+    /// <summary>
+    /// Dove far comparire un nemico evocato: una casella libera a 6–14 m da un giocatore e in vista,
+    /// così il gruppo lo vede arrivare. Senza giocatori, o se non c'è un punto così, un pavimento qualsiasi.
+    /// </summary>
+    private Pose SummoningSpot()
+    {
+        var map = Map;
+        var players = _poses.Values.ToList();
+        Pose? fallback = null;
+        for (int tries = 0; tries < 400; tries++)
+        {
+            int x = _random.Next(map.Width), z = _random.Next(map.Depth);
+            if (map[x, z] != Tile.Floor) continue;
+            var (cx, cz) = GameMap.CellCenter(x, z);
+            fallback ??= new Pose(cx, cz, 0);
+            foreach (var p in players)
+            {
+                float d = MathF.Sqrt((p.X - cx) * (p.X - cx) + (p.Z - cz) * (p.Z - cz));
+                if (d is >= 6 and <= 14 && map.HasLineOfSight(p.X, p.Z, cx, cz))
+                    return new Pose(cx, cz, MathF.Atan2(p.X - cx, p.Z - cz));
+            }
+        }
+        return fallback ?? map.Spawns[0];
+    }
+
     private ServerMessage AdventureList()
     {
         if (Campaign is null) return new Refused("Nessuna campagna caricata: avvia il server con --campagna <file>.");
@@ -374,7 +594,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         demiurgeView(message);
         var line = Wire.Encode(message);
         foreach (var player in _players.Values)
-            if (!player.Name.IsSameName(except))
+            if (player.Ready && !player.Name.IsSameName(except))
                 player.Connection.Post(line);
     }
 
@@ -385,6 +605,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         await Task.WhenAll(_players.Values.Select(p => p.Connection.FlushAsync(TimeSpan.FromSeconds(1))));
         await _stopping.CancelAsync();
         _listener.Stop();
+        if (_ticker is not null) await _ticker;
         foreach (var player in _players.Values) player.Connection.Close();
         if (_acceptLoop is not null) await _acceptLoop;
         await Task.WhenAll(_sessions.Keys);

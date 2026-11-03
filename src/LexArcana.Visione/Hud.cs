@@ -26,7 +26,7 @@ internal sealed partial class Hud : IDisposable
     public Hud(string assets)
     {
         int[] codepoints = [.. Enumerable.Range(32, 95), .. Enumerable.Range(160, 96),
-            0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026, 0x2022, 0x2192, 0x2212, 0x2766, 0x25C6];
+            0x2013, 0x2014, 0x2018, 0x2020, 0x2021, 0x2019, 0x201C, 0x201D, 0x2026, 0x2022, 0x2192, 0x2212, 0x2766, 0x25C6];
         _text = Raylib.LoadFontEx(Path.Combine(assets, "Fonts", "EBGaramond.ttf"), 44, codepoints, codepoints.Length);
         _caps = Raylib.LoadFontEx(Path.Combine(assets, "Fonts", "Cinzel.ttf"), 56, codepoints, codepoints.Length);
         Raylib.SetTextureFilter(_text.Texture, TextureFilter.Bilinear);
@@ -202,9 +202,81 @@ internal sealed partial class Hud : IDisposable
         }
     }
 
+    // ---- Combattimento
+
+    /// <summary>Nome, livello e salute sopra un nemico. Il bersaglio del mirino ha il nome dorato.</summary>
+    public void DrawEnemyTag(EnemyView e, Vector2 screen, float distance, bool targeted)
+    {
+        float size = Math.Clamp(22f - distance * 0.6f, 13f, 20f);
+        var label = e.Label;
+        var measure = Raylib.MeasureTextEx(_caps, label, size, 1);
+        float barWidth = MathF.Max(measure.X, 70);
+        var at = new Vector2(screen.X - measure.X / 2, screen.Y - measure.Y - 10);
+        Raylib.DrawRectangleRounded(new(screen.X - barWidth / 2 - 8, at.Y - 3, barWidth + 16, measure.Y + 16), 0.25f, 6, Theme.WithAlpha(Theme.Night, 160));
+        if (targeted) Raylib.DrawRectangleRoundedLinesEx(new(screen.X - barWidth / 2 - 8, at.Y - 3, barWidth + 16, measure.Y + 16), 0.25f, 6, 1.5f, Theme.Of(Tone.Gilt));
+        DrawCaps(label, at, size, targeted ? Theme.Of(Tone.Gilt) : e.Rank == "Normal" ? Theme.Of(Tone.Ink) : Theme.Of(Tone.Pompeian));
+        float fill = e.MaxHealth == 0 ? 0 : (float)e.Health / e.MaxHealth;
+        var bar = new Rectangle(screen.X - barWidth / 2, at.Y + measure.Y + 3, barWidth, 5);
+        Raylib.DrawRectangleRec(bar, Theme.Basalt);
+        Raylib.DrawRectangleRec(bar with { Width = bar.Width * fill }, Theme.Of(Tone.Pompeian));
+    }
+
+    public void DrawFloating(FloatingText f, Vector2 screen, double now)
+    {
+        float age = (float)(now - f.Time);
+        byte alpha = (byte)(255 * Math.Clamp(1.4 - age, 0, 1));
+        var at = new Vector2(screen.X - Measure(f.Text, 26) / 2, screen.Y - age * 40);
+        Raylib.DrawTextEx(_text, f.Text, at + new Vector2(1.5f, 1.5f), 26, 0, Theme.WithAlpha(Theme.Night, alpha));
+        Raylib.DrawTextEx(_text, f.Text, at, 26, 0, Theme.Of(f.Tone, alpha));
+    }
+
+    /// <summary>Salute ed esperienza in basso a destra.</summary>
+    public void DrawVitals(Vitals v)
+    {
+        int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
+        float width = 330, x = w - Margin - width, y = h - Margin - 92;
+        Raylib.DrawRectangleRec(new(x - 12, y - 10, width + 24, 72), Theme.WithAlpha(Theme.Panel, 170));
+        DrawCaps($"LIVELLO {v.Level}", new(x, y - 2), 15, Theme.Of(Tone.Gilt));
+        var health = $"{v.Health}/{v.MaxHealth}";
+        DrawText(health, new(x + width - Measure(health, 18), y - 5), 18, Theme.Of(Tone.Ink));
+        var hp = new Rectangle(x, y + 18, width, 12);
+        Raylib.DrawRectangleRec(hp, Theme.Basalt);
+        Raylib.DrawRectangleRec(hp with { Width = width * Math.Clamp((float)v.Health / Math.Max(1, v.MaxHealth), 0, 1) }, Theme.Of(Tone.Pompeian));
+        Raylib.DrawRectangleLinesEx(hp, 1, Theme.PanelEdge);
+        int from = LexArcana.Combat.Progression.ExperienceFor(v.Level), to = v.NextLevel;
+        float xp = to <= from ? 1 : Math.Clamp((float)(v.Experience - from) / (to - from), 0, 1);
+        var xpBar = new Rectangle(x, y + 38, width, 5);
+        Raylib.DrawRectangleRec(xpBar, Theme.Basalt);
+        Raylib.DrawRectangleRec(xpBar with { Width = width * xp }, Theme.Of(Tone.Gilt));
+        var label = $"esperienza {v.Experience}/{to}";
+        DrawText(label, new(x + width - Measure(label, 15), y + 44), 15, Theme.Of(Tone.Muted));
+    }
+
+    /// <summary>Un bordo rosso che sfuma: sei stato colpito.</summary>
+    public static void DrawHurt(float strength)
+    {
+        int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight(), band = 120;
+        var red = Theme.WithAlpha(Theme.Fresco, (byte)(180 * strength));
+        var none = Theme.WithAlpha(Theme.Fresco, 0);
+        Raylib.DrawRectangleGradientV(0, 0, w, band, red, none);
+        Raylib.DrawRectangleGradientV(0, h - band, w, band, none, red);
+        Raylib.DrawRectangleGradientH(0, 0, band, h, red, none);
+        Raylib.DrawRectangleGradientH(w - band, 0, band, h, none, red);
+    }
+
+    public void DrawDown(double secondsLeft)
+    {
+        int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
+        Raylib.DrawRectangle(0, 0, w, h, Theme.WithAlpha(Theme.Night, 150));
+        const string title = "SEI A TERRA";
+        DrawCaps(title, new(w / 2f - Raylib.MeasureTextEx(_caps, title, 40, 1).X / 2, h / 2f - 50), 40, Theme.Of(Tone.Pompeian));
+        var hint = secondsLeft > 0 ? $"I compagni ti coprono: ti rialzi tra {Math.Ceiling(secondsLeft)} secondi." : "Ti rialzi…";
+        DrawText(hint, new(w / 2f - Measure(hint, 22) / 2, h / 2f + 8), 22, Theme.Of(Tone.Ink));
+    }
+
     private static readonly (string Keys, string What)[] Controls =
     [
-        ("W A S D", "muoviti"), ("Maiusc", "corri"), ("Mouse", "guarda intorno"), ("Invio · T", "parla alla compagnia"),
+        ("W A S D", "muoviti"), ("Clic sinistro", "colpisci in mischia"), ("Clic destro", "tira a distanza"), ("Maiusc", "corri"), ("Mouse", "guarda intorno"), ("Invio · T", "parla alla compagnia"),
         ("/", "scrivi un comando, es. /tira d20"), ("Tab", "chi è presente"), ("C", "la scheda del personaggio"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
     ];
 

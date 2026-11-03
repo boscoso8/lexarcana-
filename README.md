@@ -63,6 +63,50 @@ Il server controlla le regole anche sui file modificati a mano: un personaggio c
 
 ![La scheda del personaggio nel client 3D](docs/scheda.png)
 
+## Combattimenti
+
+Ogni luogo si popola di nemici presi dal folclore romano. Tutti i combattimenti li risolve il server, quindi nessun client può barare.
+
+**I nemici e i luoghi**
+
+| Nemico | Dove si incontra |
+| --- | --- |
+| Cultista | templi, fori, ville |
+| Ladro di tombe | fori, catacombe |
+| Lupo nero | miniere, accampamenti |
+| Lemure | templi, ville, catacombe, necropoli |
+| Legionario scheletrico | catacombe, necropoli, accampamenti |
+| Strige | ville, necropoli |
+| Custode di bronzo | miniere |
+
+- **Livello dei nemici:** è il numero dell'avventura più il livello medio del gruppo, meno uno.
+- **Guardiano:** vicino all'altare c'è sempre un nemico più forte.
+- **Boss:** nell'ultima avventura di una campagna c'è l'antagonista in persona.
+- **Partenza:** i nemici non compaiono mai a meno di 10 metri dalle partenze.
+
+**Comandi**
+
+- **Clic sinistro** (o **F**): colpisci in mischia, con la prova d20 + Armi contro la Difesa del nemico.
+- **Clic destro** (o **R**): tiri a distanza, fino a 16 metri, con d20 + Tiro. Mira con il mirino: il nemico inquadrato ha il nome dorato.
+- **Critico:** con un 20 naturale i danni raddoppiano. Un 1 naturale manca sempre.
+
+**Come si comportano i nemici**
+
+- Vedono soltanto chi si muove nella scena 3D e non hanno muri in mezzo.
+- Inseguono, attaccano e tornano al loro posto se li semini.
+- Chi gioca dal terminale non viene attaccato.
+
+**Esperienza e livelli**
+
+- **Esperienza:** ogni nemico sconfitto ne dà a tutto il gruppo.
+- **Livelli:** si sale al 2 con 100 punti, al 3 con 300, al 4 con 600, fino al 10. Ogni livello dà +3 alla salute e, ogni due livelli, +1 ai colpi e alla Difesa.
+- **Salvataggio:** all'uscita dal client 3D l'esperienza viene scritta nel file del personaggio.
+- **Se cadi:** ti rialzi dopo 6 secondi a una partenza, con la salute piena.
+
+Il Demiurgo governa gli scontri con quattro comandi: `/nemici`, `/evoca <tipo> [livello] [capo]` (evoca in vista del gruppo), `/pace` e `/cura [nome]`.
+
+![Un legionario scheletrico in mischia](docs/combattimento.png)
+
 ## Campagne
 
 `lexarcana campagna [--seme N] [--avventure 3-7] [--cartella …]` scrive tre tipi di file:
@@ -102,7 +146,7 @@ Per entrare in 3D:
 dotnet run --project src/LexArcana.Visione -- --host 192.168.1.20 --porta 7777 --nome Aurelia --parola-d-ordine ave
 ```
 
-Nella finestra: **W A S D** per muoversi, **Maiusc** per correre, il **mouse** per guardare intorno, **Invio** o **T** per parlare, **/** per un comando (gli stessi del terminale), **Tab** per vedere chi è presente, **Esc** per liberare il mouse, **F1** per l'aiuto. Serve una scheda grafica con OpenGL 3.3.
+Nella finestra: **clic sinistro / destro** per colpire in mischia / a distanza, **W A S D** per muoversi, **Maiusc** per correre, il **mouse** per guardare intorno, **Invio** o **T** per parlare, **/** per un comando (gli stessi del terminale), **Tab** per vedere chi è presente, **Esc** per liberare il mouse, **F1** per l'aiuto. Serve una scheda grafica con OpenGL 3.3.
 
 ![Due personaggi nel corridoio d'ingresso](docs/personaggi.png)
 
@@ -152,6 +196,7 @@ dotnet publish src/LexArcana.Visione -c Release -r win-x64 --self-contained
 | `/espelli <nome> [motivo]` | allontana un giocatore |
 | `/avventura [numero]` | elenca le avventure della campagna, o porta il gruppo in quella scelta |
 | `/mappa <file>` | porta il gruppo in un luogo da un file di mappa |
+| `/nemici`, `/evoca <tipo> [livello] [capo]`, `/pace`, `/cura [nome]` | governa i nemici e le ferite |
 | `/chi`, `/aiuto`, `/fine` | presenti, aiuto, chiusura della sessione |
 
 I dadi usano la notazione standard: `d20`, `3d6+2`, `1d8+1d4-1` (fino a 100 dadi da 2–1000 facce).
@@ -164,6 +209,7 @@ I dadi usano la notazione standard: `d20`, `3d6+2`, `1d8+1d4-1` (fino a 100 dadi
   - `Game/`: dadi, schede, regole su nomi e testo.
   - `Ui/`: i colori del design system Lex Arcana (tema Night) come ANSI a 24 bit. Rispetta `NO_COLOR` e `--senza-colori`.
   - `Characters/`: le regole, il creatore passo per passo (`CharacterBuilder`), i nomi romani e i file dei personaggi.
+  - `Combat/`: il bestiario, i livelli e il motore di combattimento (`CombatEngine`), che il server fa girare 10 volte al secondo.
   - `Campaigns/`: il generatore di campagne, quello delle mappe (`MapGenerator`) e il manuale in Markdown.
   - `Game/GameMap.cs`: le mappe, le collisioni (anche il server le usa per rifiutare chi attraversa i muri) e la linea di vista.
 - `src/LexArcana`: l'eseguibile (`server` / `client`).
@@ -183,6 +229,20 @@ Per controllare il rendering senza schermo (per esempio in CI), il client 3D pu�
 
 ```bash
 xvfb-run -s "-screen 0 1280x720x24" lexarcana-visione --nome Prova --cattura prova.png --dopo 3
+```
+
+## Red3D.cs: tutto in un file
+
+`Red3D/Red3D.cs` raccoglie in un solo file C# tutto il codice di rete e 3D: protocollo, server, client, mappe, campagne, personaggi, combattimento e client grafico. Serve per leggerlo o condividerlo con chi non vuole aprire l'intero progetto, e compila da solo:
+
+```bash
+dotnet run --project Red3D -- --personaggio aurelia.json --host 192.168.1.20
+```
+
+Non va modificato a mano: si rigenera dai sorgenti in `src/` con l'app C# a file singolo di .NET 10:
+
+```bash
+dotnet run tools/GeneraRed3D.cs
 ```
 
 ## Sicurezza

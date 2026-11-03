@@ -110,5 +110,11 @@ public sealed partial class Dice(Random? random = null)
         return new(expression, [.. dice]);
     }
 
+    /// <summary>Un dado da <paramref name="sides"/> facce.</summary>
+    public int D(int sides)
+    {
+        lock (_lock) return _random.Next(1, sides + 1);
+    }
+
     private static int Number(string digits) => int.Parse(digits, CultureInfo.InvariantCulture);
 }

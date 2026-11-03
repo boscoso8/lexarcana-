@@ -26,6 +26,46 @@ public class ProtocolTests
         Assert.Equal(("Marco", Wire.ProtocolVersion), (hello.Name, hello.Version));
     }
 
+    public static TheoryData<ServerMessage> EveryServerMessage => new((ServerMessage[])[
+        new Welcome("Livia", ["Demiurgo"], new MapData("Sala", ["###", "#S#", "###"]), [new Position("Livia", 1, 2, 3)]),
+        new Joined("Livia"), new Left("Livia"), new Said("Livia", "Ave"), new Narrated("Nebbia"),
+        new Rolled("Livia", "d20", [7], 0, 7), new Rolled("Livia", "d20", [7], 0, 7, Secret: true),
+        new Whispered("Livia", "Marco", "psst"), new SheetShown("Livia", new() { ["Ferite"] = "2" }), new SheetShown("Livia", [], "Demiurgo"),
+        new PlayerList(["Demiurgo"]), new Refused("no"), new Expelled(), new Expelled("basta"), new Moved("Livia", 1, 2, 3),
+        new MapChanged(new MapData("Sala", ["###"]), []), new MapChanged(new MapData("Sala", ["###"]), [], "1. Titolo"),
+        new EnemyList([new EnemyInfo(1, "lupo", "Lupo nero", 2, 9, 9, 1, 2, 3, "Normal")]), new EnemyMoves([new EnemyPose(1, 1, 2, 3)]),
+        new Struck("Livia", "Lupo nero (liv. 2)", 15, 20, 12, true, false, 6, 3, 9, false, TargetEnemyId: 1),   // colpisce un giocatore: niente AttackerEnemyId
+        new Struck("Lupo nero (liv. 2)", "Livia", 2, 5, 14, false, false, 0, 14, 14, false, AttackerEnemyId: 1),
+        new Vitals("Livia", 10, 14, 2, 120, 300, false)]);
+
+    /// <summary>
+    /// Ogni messaggio del server sopravvive al viaggio in JSON, anche con i campi facoltativi a null.
+    /// I campi null non vengono scritti, quindi il decodificatore deve accettarli assenti.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EveryServerMessage))]
+    public void Every_server_message_round_trips(ServerMessage message)
+    {
+        var back = Wire.DecodeServer(Wire.Encode(message));
+        Assert.Equal(message.GetType(), back.GetType());
+        Assert.Equal(Wire.Encode(message), Wire.Encode(back));
+    }
+
+    public static TheoryData<ClientMessage> EveryClientMessage => new((ClientMessage[])[
+        new Hello("Livia"), new Hello("Livia", "ave"), new Say("Ave"), new RollDice("d20"), new RollDice("d20", true),
+        new Whisper("Marco", "psst"), new SetField("Ferite", "2"), new ShowSheet(), new ShowSheet("Marco"), new ListPlayers(), new Leave(),
+        new Move(1, 2, 3), new SetSheet(new() { ["Ferite"] = "2" }), new Embody(LexArcana.Characters.Character.Random("Livia", 1)),
+        new Attack(3), new Attack(3, Ranged: true)]);
+
+    [Theory]
+    [MemberData(nameof(EveryClientMessage))]
+    public void Every_client_message_round_trips(ClientMessage message)
+    {
+        var back = Wire.DecodeClient(Wire.Encode(message));
+        Assert.Equal(message.GetType(), back.GetType());
+        Assert.Equal(Wire.Encode(message), Wire.Encode(back));
+    }
+
     [Theory]
     [InlineData("non json")]
     [InlineData("{}")]

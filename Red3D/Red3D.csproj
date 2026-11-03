@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Compila Red3D.cs da solo: tutto il codice di rete e 3D in un file, più i font del client 3D. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>red3d</AssemblyName>
+    <RootNamespace>LexArcana</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- ereditati dal repository: qui li si allenta, perché è una copia da leggere e condividere -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Raylib-cs" Version="8.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\src\LexArcana.Visione\Assets\**\*" LinkBase="Assets" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
