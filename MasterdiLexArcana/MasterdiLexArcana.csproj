@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Compila MasterdiLexArcana.cs da solo: gli strumenti del Master (server, Demiurgo remoto, campagne e personaggi). -->
+  <PropertyGroup>
+    <!-- Tutto qui, senza dipendere dal Directory.Build.props del repository: il progetto si può copiare da solo. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OutputType>Exe</OutputType>
+    <!-- solo il suo file: niente altri .cs dalle cartelle vicine o annidate -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>masterdilexarcana</AssemblyName>
+    <RootNamespace>LexArcana</RootNamespace>
+    <Version>0.1.0</Version>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Pubblicato autosufficiente, porta dentro il runtime .NET 10.0.14. -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true' and '$(SelfContained)' == 'true'">
+    <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="MasterdiLexArcana.cs" />
+  </ItemGroup>
+
+</Project>

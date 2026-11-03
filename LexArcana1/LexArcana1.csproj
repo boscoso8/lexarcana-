@@ -9,6 +9,8 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <OutputType>Exe</OutputType>
+    <!-- solo il suo file: niente altri .cs dalle cartelle vicine o annidate -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <AssemblyName>lexarcana1</AssemblyName>
     <RootNamespace>LexArcana</RootNamespace>
     <Version>0.1.0</Version>
@@ -19,5 +21,9 @@
   <PropertyGroup Condition="'$(_IsPublishing)' == 'true' and '$(SelfContained)' == 'true'">
     <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="LexArcana1.cs" />
+  </ItemGroup>
 
 </Project>

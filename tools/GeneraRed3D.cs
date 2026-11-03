@@ -2,6 +2,7 @@
 //   Red3D/Red3D.cs            il client 3D (src/LexArcana.Core + src/LexArcana.Visione), con Raylib-cs
 //   LexArcana1/LexArcana1.cs  il programma principale: server, client da terminale, personaggi e campagne
 //                             (src/LexArcana.Core + src/LexArcana)
+//   MasterdiLexArcana/MasterdiLexArcana.cs  gli stessi strumenti, presentati per chi conduce (il Master)
 //
 //   dotnet run tools/GeneraRed3D.cs
 //
@@ -23,6 +24,12 @@ Generate("LexArcana1/LexArcana1.cs", ["src/LexArcana.Core", "src/LexArcana"],
     "Compila con LexArcana1.csproj (net10.0, C# 14, nessuna dipendenza esterna).",
     "Avvio: dotnet run --project LexArcana1 -- server --porta-web 8080   (oppure: client, personaggio, campagna, --versione)",
     "Il client 3D è in Red3D.cs.");
+
+Generate("MasterdiLexArcana/MasterdiLexArcana.cs", ["src/LexArcana.Core", "src/LexArcana"],
+    "MasterdiLexArcana.cs — gli strumenti del Master (il Demiurgo) di Lex Arcana in un solo file.",
+    "Compila con MasterdiLexArcana.csproj (net10.0, C# 14, nessuna dipendenza esterna).",
+    "Prepara: campagna --seme 42 · personaggio --nome Aurelia · Conduci: server --campagna <campagna.json> --porta-web 8080 --parola-demiurgo <testo> · Da remoto: client --host https://<tavolo> --nome Demiurgo",
+    "I giocatori entrano con il browser (anche iPhone), con Red3D.cs (3D) o con il client da terminale.");
 
 void Generate(string targetPath, string[] folders, string title, string build, string run, string other)
 {

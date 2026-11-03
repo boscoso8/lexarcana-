@@ -9,6 +9,8 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <OutputType>Exe</OutputType>
+    <!-- solo il suo file: niente altri .cs dalle cartelle vicine o annidate -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <AssemblyName>red3d</AssemblyName>
     <Version>0.1.0</Version>
     <RootNamespace>LexArcana</RootNamespace>
@@ -32,6 +34,10 @@
   </ItemGroup>
   <ItemGroup Condition="!Exists('..\src\LexArcana.Visione\Assets')">
     <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Red3D.cs" />
   </ItemGroup>
 
 </Project>
