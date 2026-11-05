@@ -227,6 +227,10 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
                 case LevelUp(var f):
                     messages.Add((new Narrated($"{f.Name} sale al livello {f.Level}: salute piena, colpi più sicuri."), null));
                     break;
+                case Miracle m:
+                    messages.Add((new SpellCast(m.Caster, m.Spell.Id, m.Spell.Name, m.Spell.Tradition.ToString(), m.Roll, m.Total, m.Against,
+                        m.Success, m.Target, m.Amount, m.Duration, m.X, m.Z), null));
+                    break;
                 case Respawned(var f, var pose):
                     _poses[f.Name] = pose;
                     messages.Add((new Moved(f.Name, pose.X, pose.Z, pose.Yaw), null));
@@ -248,7 +252,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         new(e.Id, e.Kind.Id, e.Name, e.Level, e.Health, e.MaxHealth, e.Pose.X, e.Pose.Z, e.Pose.Yaw, e.Rank.ToString());
 
     private static Vitals ToVitals(Fighter f) =>
-        new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown);
+        new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown, f.Resolve, f.MaxResolve, [.. f.Spells.Select(s => s.Id)]);
 
     private async Task AcceptLoopAsync(CancellationToken ct)
     {
@@ -396,6 +400,7 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         SetSheet(var fields) => SetSheetFields(player.Name, fields),
         Embody(var character) => EmbodyAs(player, character),
         Attack(var enemyId, var ranged) => AttackWith(player, enemyId, ranged),
+        Cast(var spell, var enemyId, var ally) => CastBy(player, spell, enemyId, ally),
         ShowSheet(var owner) => Sheet(owner ?? player.Name),
         ListPlayers => new PlayerList(Present()),
         Move(var x, var z, var yaw) => MoveTo(player, new Pose(x, z, yaw)),
@@ -472,6 +477,18 @@ public sealed class GameServer(IPAddress address, int port, Action<ServerMessage
         lock (_combatLock) vitals = ToVitals(Combat.Join(player.Name, character));
         player.Send(vitals);
         return sheetReply;
+    }
+
+    private Refused? CastBy(Player player, string spell, int? enemyId, string? ally)
+    {
+        var pose = _poses.GetValueOrDefault(player.Name, Map.Spawns[0]);
+        var players = _poses.Where(p => _inWorld.ContainsKey(p.Key) || p.Key.IsSameName(player.Name)).ToDictionary(p => p.Key, p => p.Value, StringComparer.OrdinalIgnoreCase);
+        List<(ServerMessage, string?)> messages;
+        string? refusal;
+        lock (_combatLock) messages = Translate(Combat.Cast(player.Name, pose, spell, enemyId, ally, Now, players, out refusal));
+        // il bersaglio della Mano di Asclepio riceve la sua salute nuova, gli altri vedono il prodigio
+        Publish(messages);
+        return refusal is null ? null : new Refused(refusal);
     }
 
     private Refused? AttackWith(Player player, int enemyId, bool ranged)

@@ -22,6 +22,7 @@ namespace LexArcana.Protocol;
 [JsonDerivedType(typeof(Embody), "embody")]
 [JsonDerivedType(typeof(Attack), "attack")]
 [JsonDerivedType(typeof(Command), "command")]
+[JsonDerivedType(typeof(Cast), "cast")]
 public abstract record ClientMessage;
 
 /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -45,6 +46,8 @@ public sealed record Embody(LexArcana.Characters.Character Character) : ClientMe
 public sealed record Attack(int EnemyId, bool Ranged = false) : ClientMessage;
 /// <summary>Un comando del Demiurgo che conduce da remoto, es. "/narra …" o "/avventura 2".</summary>
 public sealed record Command(string Line) : ClientMessage;
+/// <summary>Lancia un prodigio (vedi Grimoire): su un nemico (EnemyId), su un compagno (Ally) o senza bersaglio.</summary>
+public sealed record Cast(string Spell, int? EnemyId = null, string? Ally = null) : ClientMessage;
 
 /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
@@ -65,6 +68,7 @@ public sealed record Command(string Line) : ClientMessage;
 [JsonDerivedType(typeof(EnemyMoves), "enemy_moves")]
 [JsonDerivedType(typeof(Struck), "struck")]
 [JsonDerivedType(typeof(Vitals), "vitals")]
+[JsonDerivedType(typeof(SpellCast), "spell")]
 public abstract record ServerMessage;
 
 /// <summary>L'accoglienza: chi c'è, il luogo (righe della mappa) e dove si trova ognuno, te compreso.</summary>
@@ -106,4 +110,11 @@ public sealed record Struck(
     int Health, int MaxHealth, bool Defeated, bool Ranged = false,
     int? AttackerEnemyId = null, int? TargetEnemyId = null) : ServerMessage;
 /// <summary>Salute, livello ed esperienza di un giocatore.</summary>
-public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down) : ServerMessage;
+public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down,
+    int Resolve = 0, int MaxResolve = 0, string[]? Spells = null) : ServerMessage;
+/// <summary>
+/// Un prodigio lanciato. Spell è l'id nel grimorio, Name il nome da mostrare; Target chi lo riceve; Amount danni, cure
+/// o quanti ne sono colpiti; Duration la durata dell'effetto in secondi; X, Z dove avviene.
+/// </summary>
+public sealed record SpellCast(string Caster, string Spell, string Name, string Tradition, int Roll, int Total, int Against, bool Success,
+    string? Target = null, int Amount = 0, double Duration = 0, float X = 0, float Z = 0) : ServerMessage;

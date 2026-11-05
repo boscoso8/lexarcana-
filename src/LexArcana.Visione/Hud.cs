@@ -275,11 +275,51 @@ internal sealed partial class Hud : IDisposable
         Raylib.DrawRectangleLinesEx(hp, 1, Theme.PanelEdge);
         int from = LexArcana.Combat.Progression.ExperienceFor(v.Level), to = v.NextLevel;
         float xp = to <= from ? 1 : Math.Clamp((float)(v.Experience - from) / (to - from), 0, 1);
+        if (v.MaxResolve > 0)
+        {
+            var will = new Rectangle(x, y + 32, width, 4);
+            Raylib.DrawRectangleRec(will, Theme.Basalt);
+            Raylib.DrawRectangleRec(will with { Width = width * Math.Clamp((float)v.Resolve / v.MaxResolve, 0, 1) }, Theme.Of(Tone.Verdigris));
+        }
         var xpBar = new Rectangle(x, y + 38, width, 5);
         Raylib.DrawRectangleRec(xpBar, Theme.Basalt);
         Raylib.DrawRectangleRec(xpBar with { Width = width * xp }, Theme.Of(Tone.Gilt));
-        var label = $"esperienza {v.Experience}/{to}";
+        var label = v.MaxResolve > 0 ? $"volontà {v.Resolve}/{v.MaxResolve} · esperienza {v.Experience}/{to}" : $"esperienza {v.Experience}/{to}";
         DrawText(label, new(x + width - Measure(label, 15), y + 44), 15, Theme.Of(Tone.Muted));
+    }
+
+    /// <summary>
+    /// La barra dei prodigi conosciuti: numero (il tasto), nome e costo in Volontà; spenti quelli che non ci si può permettere.
+    /// <paramref name="selected"/> è quello del pulsante PRODIGIO sugli schermi touch.
+    /// </summary>
+    public void DrawSpellBar(IReadOnlyList<LexArcana.Combat.Spell> spells, int resolve, int selected)
+    {
+        if (spells.Count == 0) return;
+        int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
+        if (Compact)
+        {
+            var s = spells[Math.Clamp(selected, 0, spells.Count - 1)];
+            var text = $"{s.Name} · {s.Cost}";
+            float tw = Measure(text, 17);
+            DrawText(text, new(w - Margin - tw, h * 0.47f), 17, Theme.Of(resolve >= s.Cost ? Tone.Verdigris : Tone.Muted));
+            return;
+        }
+        // una colonna a destra, sopra il pannello della salute: una riga per prodigio
+        float width = 330, rowHeight = 27, x = w - Margin - width;
+        float y = h - Margin - 92 - 14 - spells.Count * (rowHeight + 3);
+        for (int i = 0; i < spells.Count; i++)
+        {
+            var s = spells[i];
+            bool ok = resolve >= s.Cost;
+            var tone = s.Tradition switch { LexArcana.Combat.Tradition.Miracoli => Tone.Gilt, LexArcana.Combat.Tradition.Invocazioni => Tone.Verdigris, _ => Tone.Bronze };
+            var rect = new Rectangle(x - 12, y + i * (rowHeight + 3), width + 24, rowHeight);
+            Raylib.DrawRectangleRec(rect, Theme.WithAlpha(Theme.Panel, 170));
+            Raylib.DrawRectangleRec(rect with { Width = 3 }, Theme.Of(ok ? tone : Tone.Muted, 220));
+            DrawCaps($"{i + 1}", new(rect.X + 12, rect.Y + 6), 14, Theme.Of(ok ? tone : Tone.Muted));
+            DrawText(s.Name, new(rect.X + 34, rect.Y + 3), 19, Theme.Of(ok ? Tone.Ink : Tone.Muted, (byte)(ok ? 255 : 160)));
+            var cost = $"{s.Cost} volontà";
+            DrawText(cost, new(rect.X + rect.Width - 12 - Measure(cost, 15), rect.Y + 6), 15, Theme.Of(ok ? Tone.Verdigris : Tone.Muted));
+        }
     }
 
     /// <summary>Un bordo rosso che sfuma: sei stato colpito.</summary>
@@ -307,7 +347,7 @@ internal sealed partial class Hud : IDisposable
     private static readonly (string Keys, string What)[] Controls =
     [
         ("W A S D", "muoviti"), ("Clic sinistro", "colpisci in mischia"), ("Clic destro", "tira a distanza"), ("Maiusc", "corri"), ("Mouse", "guarda intorno"), ("Invio · T", "parla alla compagnia"),
-        ("/", "scrivi un comando, es. /tira d20"), ("Tab", "chi è presente"), ("C", "la scheda del personaggio"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
+        ("/", "scrivi un comando, es. /tira d20"), ("1 … 9", "lancia un prodigio"), ("Tab", "chi è presente"), ("C", "la scheda del personaggio"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
     ];
 
     private void DrawHelp(int w, int h)
