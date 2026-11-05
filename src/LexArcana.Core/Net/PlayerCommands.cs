@@ -22,6 +22,8 @@ public static class PlayerCommands
           /sussurra <nome> <testo>     parla in privato (il Demiurgo sente tutto)
           /scheda [nome]               mostra la tua scheda o quella di un compagno
           /imposta <campo> [valore]    scrivi un campo della tua scheda; senza valore lo cancelli
+          /lancia <prodigio> [nome]    un prodigio su di te o su un compagno, es. /lancia mano Livia
+                                       (quelli sui nemici si lanciano nella scena 3D, con 1 2 3)
           /chi                         chi è presente
           /aiuto                       questo elenco
           /esci                        lascia la sessione
@@ -46,6 +48,9 @@ public static class PlayerCommands
             "imposta" => CommandLine.FirstWord(rest) is ({ Length: > 0 } key, var value)
                 ? new PlayerInput.Send(new SetField(key, value))
                 : new PlayerInput.Invalid("Uso: /imposta <campo> [valore], es. /imposta Ferite 2"),
+            "lancia" => CommandLine.FirstWord(rest) is ({ Length: > 0 } spell, var ally)
+                ? new PlayerInput.Send(new Cast(spell, null, ally.Length == 0 ? null : ally))
+                : new PlayerInput.Invalid("Uso: /lancia <prodigio> [nome], es. /lancia mano Livia"),
             "chi" => new PlayerInput.Send(new ListPlayers()),
             "aiuto" or "?" => new PlayerInput.ShowHelp(),
             "esci" => new PlayerInput.Quit(),

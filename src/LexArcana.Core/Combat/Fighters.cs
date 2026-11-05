@@ -42,6 +42,10 @@ public sealed class Enemy
     public float Reach => Kind.Reach * (Rank == EnemyRank.Boss ? 1.25f : 1f);
 
     internal string? Target { get; set; }
+    /// <summary>Fermato dalle Catene di Saturno fino a questo istante.</summary>
+    internal double StunnedUntil { get; set; }
+    /// <summary>In fuga per il Terrore di Pan fino a questo istante.</summary>
+    internal double FleeingUntil { get; set; }
     internal double NextAttackAt { get; set; }
     internal Pose LastSent { get; set; }
 
@@ -64,6 +68,7 @@ public sealed class Fighter
         Experience = character?.Experience ?? 0;
         Level = Progression.LevelFor(Experience);
         Health = MaxHealth;
+        Resolve = MaxResolve;
     }
 
     public string Name { get; }
@@ -73,11 +78,25 @@ public sealed class Fighter
     public bool IsDown => Health <= 0;
     internal double RespawnAt { get; set; }
     internal double NextAttackAt { get; set; }
+    internal double NextCastAt { get; set; }
+    internal double NextResolveAt { get; set; }
+    internal double AegisUntil { get; set; }
+
+    /// <summary>La Volontà: la riserva da cui si pagano i prodigi.</summary>
+    public int Resolve { get; internal set; }
+    public int MaxResolve => (_character?.Resolve ?? 6) + (Level - 1);
+    public IReadOnlyList<Spell> Spells => Grimoire.Known(_character, Level);
+    public bool Knows(Spell spell) => Spells.Contains(spell);
+
+    /// <summary>Il bonus della prova di un prodigio: attributo + abilità della tradizione + bonus di livello.</summary>
+    public int CastBonus(Tradition t) => _character is { } c ? c[Grimoire.Trait(t)] + c.SkillRank(Grimoire.Skill(t)) + LevelBonus : 0;
+    public int TraitValue(Trait t) => _character?[t] ?? 1;
 
     private int LevelBonus => (Level - 1) / 2;
 
     public int MaxHealth => (_character?.Health ?? DefaultHealth) + 3 * (Level - 1);
-    public int Defense => (_character?.Defense ?? DefaultDefense) + LevelBonus;
+    public int Defense => (_character?.Defense ?? DefaultDefense) + LevelBonus + AegisBonus;
+    internal int AegisBonus { get; set; }
     public int MeleeBonus => (_character?.CheckBonus("Armi") ?? DefaultMelee) + LevelBonus;
     public int RangedBonus => (_character?.CheckBonus("Tiro") ?? DefaultRanged) + LevelBonus;
     public int MeleeDamageBonus => (_character is { } c ? c[Trait.Robur] / 2 : 1) + LevelBonus;
@@ -94,6 +113,7 @@ public sealed class Fighter
         if (level == Level) return false;
         Level = level;
         Health = MaxHealth;
+        Resolve = MaxResolve;
         return true;
     }
 }

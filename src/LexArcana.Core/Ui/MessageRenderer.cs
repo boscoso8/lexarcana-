@@ -57,6 +57,9 @@ public sealed class MessageRenderer(string viewer)
             case Struck s:
                 Blow(t, s);
                 break;
+            case SpellCast c:
+                Spell(t, c);
+                break;
             case EnemyList(var enemies) when enemies.Length > 0:
                 t.Add($"† {enemies.Length} nemici nel luogo", Tone.Pompeian).Add(
                     $" · livello {enemies.Min(e => e.Level)}–{enemies.Max(e => e.Level)}" +
@@ -69,6 +72,28 @@ public sealed class MessageRenderer(string viewer)
     }
 
     private bool IsViewer(string name) => name.IsSameName(viewer);
+
+    private void Spell(StyledText t, SpellCast c)
+    {
+        string who = IsViewer(c.Caster) ? "Tu" : c.Caster.Sanitized;
+        var tone = c.Tradition switch { "Miracoli" => Tone.Gilt, "Invocazioni" => Tone.Verdigris, _ => Tone.Bronze };
+        t.Add("❦ ", tone).Add(who, Tone.Bronze, bold: true)
+         .Add(IsViewer(c.Caster) ? " invochi " : " invoca ", Tone.Muted).Add(c.Name.Sanitized, tone, bold: true);
+        if (c.Target is { Length: > 0 } target && c.Spell is "mano" or "catene" or "egida")
+            t.Add($" su {(IsViewer(target) ? "di te" : target.Sanitized)}", Tone.Muted);
+        t.Add($"  [{c.Roll}] {c.Total} contro {c.Against}", Tone.Muted);
+        if (!c.Success) { t.Add(": il prodigio non risponde.", Tone.Muted, italic: true); return; }
+        string effect = c.Spell switch
+        {
+            "mano" => $": +{c.Amount} salute",
+            "catene" => $": fermo per {c.Duration:0} secondi",
+            "egida" => $": +3 alla Difesa per {c.Duration:0} secondi",
+            "occhio" => $": vedi {c.Amount} nemici per {c.Duration:0} secondi",
+            "pan" => c.Amount == 0 ? ": nessun nemico abbastanza vicino" : $": {c.Amount} nemici fuggono",
+            _ => "",
+        };
+        if (effect.Length > 0) t.Add(effect, tone);
+    }
 
     private void Blow(StyledText t, Struck s)
     {

@@ -11,7 +11,7 @@ namespace LexArcana.Visione;
 /// </summary>
 internal sealed class TouchControls(Func<double[]>? source = null)
 {
-    public enum Button { Melee, Ranged, Talk, Sheet }
+    public enum Button { Melee, Ranged, Talk, Sheet, Spell, NextSpell }
 
     private readonly Dictionary<int, (Vector2 Start, Vector2 Last, string Role)> _touches = [];
     private Vector2 _joyOrigin, _joyKnob;
@@ -23,6 +23,9 @@ internal sealed class TouchControls(Func<double[]>? source = null)
 
     private static float Unit => MathF.Max(48f, MathF.Min(Raylib.GetScreenWidth(), Raylib.GetScreenHeight()) * 0.11f);
 
+    /// <summary>Se il personaggio conosce prodigi: allora compaiono i pulsanti PRODIGIO e › (il successivo).</summary>
+    public static bool SpellsAvailable { get; set; }
+
     public static IEnumerable<(Button Button, Rectangle Rect, string Label)> Buttons()
     {
         int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
@@ -31,6 +34,11 @@ internal sealed class TouchControls(Func<double[]>? source = null)
         yield return (Button.Ranged, new Rectangle(w - u * 3.0f - gap * 2, h - u * 1.15f - gap, u * 1.3f, u * 1.15f), "TIRA");
         yield return (Button.Talk, new Rectangle(w - u * 1.6f - gap, h - u * 2.6f - gap * 2, u * 1.6f, u * 0.8f), "PARLA");
         yield return (Button.Sheet, new Rectangle(w - u * 3.0f - gap * 2, h - u * 2.6f - gap * 2, u * 1.3f, u * 0.8f), "SCHEDA");
+        if (SpellsAvailable)
+        {
+            yield return (Button.Spell, new Rectangle(w - u * 1.6f - gap, h - u * 3.6f - gap * 3, u * 1.6f, u * 0.8f), "PRODIGIO");
+            yield return (Button.NextSpell, new Rectangle(w - u * 2.5f - gap * 2, h - u * 3.6f - gap * 3, u * 0.8f, u * 0.8f), "›");
+        }
     }
 
     public void Update()

@@ -107,6 +107,24 @@ Il Demiurgo governa gli scontri con quattro comandi: `/nemici`, `/evoca <tipo> [
 
 ![Un legionario scheletrico in mischia](docs/combattimento.png)
 
+## Magia: incantesimi, miracoli e invocazioni
+
+Chi ha almeno un grado nell'abilità di una tradizione ne conosce i prodigi: il primo subito, il secondo dal livello 3, il terzo dal livello 5. Ogni prodigio costa punti **Volontà**, la riserva magica della scheda. La Volontà torna di un punto ogni 5 secondi, e del tutto quando si sale di livello o ci si rialza.
+
+La prova è d20 + attributo + abilità contro la Difesa del nemico, o contro la difficoltà del prodigio (10, 12 o 14). La Volontà si spende anche se la prova fallisce.
+
+| Tradizione | Abilità + attributo | 1 · subito | 2 · dal livello 3 | 3 · dal livello 5 |
+| --- | --- | --- | --- | --- |
+| Incantesimi | Erudizione + Ingenium | Dardo di luce (2d6, 18 m) | Catene di Saturno (il nemico resta fermo per 4 s) | Fiamma di Vulcano (2d8 entro 3 m dal bersaglio) |
+| Miracoli divini | Riti + Pietas | Mano di Asclepio (cura 2d6 + Pietas) | Egida di Minerva (+3 Difesa al gruppo per 20 s) | Folgore di Giove (3d8 + Pietas) |
+| Invocazioni | Presagi + Pietas | Occhio dell'augure (vedi i nemici attraverso i muri per 15 s) | Esorcismo dei Mani (3d6 + Pietas su lemuri e scheletri) | Terrore di Pan (i nemici vicini fuggono per 6 s) |
+
+**Come si lanciano**
+
+- **Client 3D:** con i tasti **1–9**. I prodigi d'attacco vanno sul nemico nel mirino. La Mano di Asclepio va sul compagno nel mirino, oppure su di te.
+- **iPhone:** con i pulsanti **PRODIGIO** e **›**, che sceglie il prodigio.
+- **Terminale:** con `/lancia mano Livia`, solo per i prodigi che non serve mirare.
+
 ## Campagne
 
 `lexarcana campagna [--seme N] [--avventure 3-7] [--cartella …]` scrive tre tipi di file:
@@ -146,7 +164,7 @@ Per entrare in 3D:
 dotnet run --project src/LexArcana.Visione -- --host 192.168.1.20 --porta 7777 --nome Aurelia --parola-d-ordine ave
 ```
 
-Nella finestra: **clic sinistro / destro** per colpire in mischia / a distanza, **W A S D** per muoversi, **Maiusc** per correre, il **mouse** per guardare intorno, **Invio** o **T** per parlare, **/** per un comando (gli stessi del terminale), **Tab** per vedere chi è presente, **Esc** per liberare il mouse, **F1** per l'aiuto. Serve una scheda grafica con OpenGL 3.3.
+Nella finestra: **clic sinistro / destro** per colpire in mischia / a distanza, **1–9** per i prodigi, **W A S D** per muoversi, **Maiusc** per correre, il **mouse** per guardare intorno, **Invio** o **T** per parlare, **/** per un comando (gli stessi del terminale), **Tab** per vedere chi è presente, **Esc** per liberare il mouse, **F1** per l'aiuto. Serve una scheda grafica con OpenGL 3.3.
 
 ![Due personaggi nel corridoio d'ingresso](docs/personaggi.png)
 
@@ -237,7 +255,7 @@ I dadi usano la notazione standard: `d20`, `3d6+2`, `1d8+1d4-1` (fino a 100 dadi
   - `Game/`: dadi, schede, regole su nomi e testo.
   - `Ui/`: i colori del design system Lex Arcana (tema Night) come ANSI a 24 bit. Rispetta `NO_COLOR` e `--senza-colori`.
   - `Characters/`: le regole, il creatore passo per passo (`CharacterBuilder`), i nomi romani e i file dei personaggi.
-  - `Combat/`: il bestiario, i livelli e il motore di combattimento (`CombatEngine`), che il server fa girare 10 volte al secondo.
+  - `Combat/`: il bestiario, i livelli, il grimorio dei prodigi (`Magic.cs`) e il motore di combattimento (`CombatEngine`), che il server fa girare 10 volte al secondo.
   - `Campaigns/`: il generatore di campagne, quello delle mappe (`MapGenerator`) e il manuale in Markdown.
   - `Game/GameMap.cs`: le mappe, le collisioni (anche il server le usa per rifiutare chi attraversa i muri) e la linea di vista.
 - `src/LexArcana`: l'eseguibile (`server` / `client`).

@@ -1,6 +1,6 @@
 // Red3D.cs — Lex Arcana: rete e 3D in un solo file.
 // Generato da tools/GeneraRed3D.cs: non modificarlo a mano, modifica i sorgenti in src/ e rigeneralo.
-// Contiene 42 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
+// Contiene 43 file sorgente. Compila con Red3D.csproj (net10.0, C# 14, Raylib-cs).
 //
 // Avvio del client 3D: dotnet run --project Red3D -- --personaggio aurelia.json --host <indirizzo del Demiurgo>
 // Il server e gli strumenti (personaggi, campagne) sono in LexArcana1.cs.
@@ -819,6 +819,13 @@ namespace LexArcana.Characters
             yield return ("Difesa", Defense.ToString(System.Globalization.CultureInfo.InvariantCulture));
             yield return ("Abilità", string.Join(", ", Rules.Skills.Where(s => SkillRank(s.Name) > 0).Select(s => $"{s.Name} +{CheckBonus(s.Name)}")));
             yield return ("Equipaggiamento", string.Join(", ", VocationInfo.Equipment));
+            var spells = Combat.Grimoire.All.Where(s => SkillRank(Combat.Grimoire.Skill(s.Tradition)) > 0).ToList();
+            if (spells.Count > 0)
+            {
+                var known = spells.Where(s => Level >= Combat.Grimoire.LevelFor(s.Tier)).Select(s => s.Name).ToList();
+                int later = spells.Count - known.Count;
+                yield return ("Magia", string.Join(", ", known) + (later > 0 ? $" · altri {later} salendo di livello" : ""));
+            }
             if (Concept.Length > 0) yield return ("Concetto", Concept);
         }
 
@@ -1205,6 +1212,9 @@ namespace LexArcana.Combat
     public sealed record VitalsChanged(Fighter Fighter) : CombatEvent;
     public sealed record LevelUp(Fighter Fighter) : CombatEvent;
     public sealed record Respawned(Fighter Fighter, Pose Pose) : CombatEvent;
+    /// <summary>Un prodigio lanciato, riuscito o no. Target è chi ne riceve l'effetto; X, Z dove avviene (per gli effetti visivi).</summary>
+    public sealed record Miracle(string Caster, Spell Spell, int Roll, int Total, int Against, bool Success,
+        string? Target, int Amount, double Duration, float X, float Z) : CombatEvent;
 
     /// <summary>
     /// Il combattimento, tutto lato server: dove sono i nemici, chi inseguono, chi colpisce chi.
@@ -1320,18 +1330,153 @@ namespace LexArcana.Combat
             events.Add(new Blow(fighter.Name, null, enemy.Label, enemy.Id, roll, total, enemy.Defense, hit, critical, damage,
                 enemy.Health, enemy.MaxHealth, enemy.IsDead, ranged));
 
-            if (enemy.IsDead)
+            if (enemy.IsDead) Defeat(enemy, events);
+            return events;
+        }
+
+        /// <summary>Un nemico sconfitto: sparisce e l'esperienza va a tutto il gruppo, perché si combatte insieme.</summary>
+        private void Defeat(Enemy enemy, List<CombatEvent> events)
+        {
+            _enemies.Remove(enemy.Id);
+            foreach (var f in _fighters.Values)
             {
-                _enemies.Remove(enemy.Id);
-                // l'esperienza va a tutto il gruppo: si combatte insieme
-                foreach (var f in _fighters.Values)
+                bool levelled = f.Gain(enemy.Experience);
+                events.Add(new VitalsChanged(f));
+                if (levelled) events.Add(new LevelUp(f));
+            }
+        }
+
+        public const double CastCooldown = 1.2, ResolveRegenEvery = 5;
+
+        /// <summary>
+        /// Un prodigio. La prova è d20 + attributo + abilità della tradizione: contro la Difesa del nemico se lo colpisce,
+        /// altrimenti contro la difficoltà del prodigio. La Volontà si spende comunque, anche se la prova fallisce.
+        /// <paramref name="players"/> sono le posizioni dei giocatori nella scena, per i prodigi su compagni e gruppo.
+        /// </summary>
+        public List<CombatEvent> Cast(string caster, Pose from, string spellId, int? enemyId, string? ally, double now,
+            IReadOnlyDictionary<string, Pose> players, out string? refusal)
+        {
+            List<CombatEvent> events = [];
+            refusal = null;
+            if (FighterOf(caster) is not { } fighter) { refusal = "Non sei in gioco."; return events; }
+            if (Grimoire.Find(spellId) is not { } spell) { refusal = $"Non esiste un prodigio «{spellId}»."; return events; }
+            if (!fighter.Knows(spell))
+            {
+                refusal = $"Non conosci {spell.Name}: serve un grado in {Grimoire.Skill(spell.Tradition)} e il livello {Grimoire.LevelFor(spell.Tier)}.";
+                return events;
+            }
+            if (fighter.IsDown) { refusal = "Sei a terra: aspetta di rialzarti."; return events; }
+            if (now < fighter.NextCastAt) return events;
+            if (fighter.Resolve < spell.Cost) { refusal = $"Ti manca la Volontà: {spell.Name} costa {spell.Cost}, ne hai {fighter.Resolve}."; return events; }
+
+            Enemy? enemy = null;
+            Fighter? friend = null;
+            Pose at = from;
+            switch (spell.Target)
+            {
+                case SpellTarget.Enemy:
+                    if (enemyId is not { } id || EnemyOf(id) is not { IsDead: false } e) { refusal = $"{spell.Name} va lanciato su un nemico."; return events; }
+                    if (Distance(from.X, from.Z, e.Pose.X, e.Pose.Z) > spell.Range) { refusal = $"Troppo lontano per {spell.Name} (al massimo {spell.Range:0} metri)."; return events; }
+                    if (!Map.HasLineOfSight(from.X, from.Z, e.Pose.X, e.Pose.Z)) { refusal = "Non vedi il bersaglio."; return events; }
+                    enemy = e;
+                    at = e.Pose;
+                    break;
+                case SpellTarget.Ally:
+                    friend = ally is null || ally.IsSameName(caster) ? fighter : FighterOf(ally);
+                    if (friend is null || friend.IsDown) { refusal = "Quel compagno non può ricevere il prodigio."; return events; }
+                    if (friend != fighter)
+                    {
+                        if (!players.TryGetValue(friend.Name, out var p) || Distance(from.X, from.Z, p.X, p.Z) > spell.Range)
+                        { refusal = $"{friend.Name} è troppo lontano (al massimo {spell.Range:0} metri)."; return events; }
+                        at = p;
+                    }
+                    break;
+            }
+
+            fighter.NextCastAt = now + CastCooldown;
+            fighter.Resolve -= spell.Cost;
+            int against = enemy?.Defense ?? spell.Difficulty;
+            var (roll, total, success, critical) = Resolve(fighter.CastBonus(spell.Tradition), against);
+            int pietas = fighter.TraitValue(Characters.Trait.Pietas), ingenium = fighter.TraitValue(Characters.Trait.Ingenium);
+            int amount = 0;
+            double duration = 0;
+            string? target = enemy?.Label ?? friend?.Name;
+
+            if (success)
+                switch (spell.Id)
                 {
-                    bool levelled = f.Gain(enemy.Experience);
-                    events.Add(new VitalsChanged(f));
-                    if (levelled) events.Add(new LevelUp(f));
+                    case "dardo":
+                        amount = Damage(2, 6, critical) + ingenium / 2;
+                        break;
+                    case "catene":
+                        duration = enemy!.Rank == EnemyRank.Boss ? 2 : 4;
+                        enemy.StunnedUntil = now + duration;
+                        break;
+                    case "fiamma":
+                        amount = Damage(2, 8, critical) + ingenium / 2;
+                        break;
+                    case "mano":
+                        amount = Math.Min(Damage(2, 6, critical) + pietas, friend!.MaxHealth - friend.Health);
+                        friend.Health += amount;
+                        events.Add(new VitalsChanged(friend));
+                        break;
+                    case "egida":
+                        duration = 20;
+                        foreach (var f in _fighters.Values.Where(f => !f.IsDown && (f == fighter ||
+                                     players.TryGetValue(f.Name, out var p) && Distance(from.X, from.Z, p.X, p.Z) <= spell.Range)))
+                        {
+                            f.AegisBonus = 3;
+                            f.AegisUntil = now + duration;
+                            amount++;
+                        }
+                        target = amount == 1 ? caster : $"{amount} compagni";
+                        break;
+                    case "folgore":
+                        amount = Damage(3, 8, critical) + pietas;
+                        break;
+                    case "occhio":
+                        duration = 15;
+                        amount = _enemies.Count;
+                        break;
+                    case "esorcismo":
+                        amount = Grimoire.IsUndead(enemy!.Kind) ? Damage(3, 6, critical) + pietas : Damage(1, 6, critical);
+                        break;
+                    case "pan":
+                        duration = 6;
+                        foreach (var e in _enemies.Values.Where(e => e.Rank != EnemyRank.Boss && Distance(from.X, from.Z, e.Pose.X, e.Pose.Z) <= spell.Range))
+                        {
+                            e.FleeingUntil = now + duration;
+                            e.Target = null;
+                            amount++;
+                        }
+                        break;
+                }
+
+            events.Add(new Miracle(caster, spell, roll, total, against, success, target, amount, duration, at.X, at.Z));
+            events.Add(new VitalsChanged(fighter));
+
+            // i danni: al bersaglio, o a tutti quelli vicini per la Fiamma di Vulcano
+            if (success && enemy is not null && amount > 0 && spell.Id is "dardo" or "fiamma" or "folgore" or "esorcismo")
+            {
+                var hit = spell.Id == "fiamma"
+                    ? _enemies.Values.Where(e => Distance(at.X, at.Z, e.Pose.X, e.Pose.Z) <= 3f).ToList()
+                    : [enemy];
+                foreach (var e in hit)
+                {
+                    e.Health = Math.Max(0, e.Health - amount);
+                    e.Target ??= fighter.Name;
+                    events.Add(new Blow(fighter.Name, null, e.Label, e.Id, roll, total, against, true, critical, amount, e.Health, e.MaxHealth, e.IsDead, true));
+                    if (e.IsDead) Defeat(e, events);
                 }
             }
             return events;
+
+            int Damage(int count, int sides, bool crit)
+            {
+                int sum = 0;
+                for (int i = 0; i < count * (crit ? 2 : 1); i++) sum += dice.D(sides);
+                return sum;
+            }
         }
 
         /// <summary>
@@ -1342,9 +1487,23 @@ namespace LexArcana.Combat
         {
             List<CombatEvent> events = [];
 
+            foreach (var f in _fighters.Values)
+            {
+                if (f.AegisBonus > 0 && now >= f.AegisUntil) f.AegisBonus = 0;
+                if (f.IsDown || f.Resolve >= f.MaxResolve) { f.NextResolveAt = now + ResolveRegenEvery; continue; }
+                if (f.NextResolveAt == 0) f.NextResolveAt = now + ResolveRegenEvery;
+                if (now >= f.NextResolveAt)
+                {
+                    f.Resolve++;
+                    f.NextResolveAt = now + ResolveRegenEvery;
+                    events.Add(new VitalsChanged(f));
+                }
+            }
+
             foreach (var f in _fighters.Values.Where(f => f.IsDown && f.RespawnAt > 0 && now >= f.RespawnAt))
             {
                 f.Health = f.MaxHealth;
+                f.Resolve = f.MaxResolve;
                 f.RespawnAt = 0;
                 events.Add(new Respawned(f, Map.Spawns[Math.Abs(f.Name.GetHashCode(StringComparison.OrdinalIgnoreCase)) % Map.Spawns.Length]));
                 events.Add(new VitalsChanged(f));
@@ -1353,6 +1512,20 @@ namespace LexArcana.Combat
             List<Enemy> moved = [];
             foreach (var enemy in _enemies.Values)
             {
+                if (now < enemy.StunnedUntil) continue; // fermo nelle Catene di Saturno
+                if (now < enemy.FleeingUntil)
+                {
+                    // Terrore di Pan: scappa dal giocatore più vicino
+                    var near = players.Values.OrderBy(p => Distance(p.X, p.Z, enemy.Pose.X, enemy.Pose.Z)).Cast<Pose?>().FirstOrDefault();
+                    if (near is { } n)
+                    {
+                        float fx = enemy.Pose.X - n.X, fz = enemy.Pose.Z - n.Z, fd = MathF.Max(MathF.Sqrt(fx * fx + fz * fz), 0.001f);
+                        float step = enemy.Kind.Speed * dt / fd;
+                        enemy.Pose = Map.Slide(enemy.Pose, fx * step, fz * step, MathF.Atan2(fx, fz));
+                        if (Distance(enemy.Pose.X, enemy.Pose.Z, enemy.LastSent.X, enemy.LastSent.Z) > 0.03f) { enemy.LastSent = enemy.Pose; moved.Add(enemy); }
+                    }
+                    continue;
+                }
                 var target = ChooseTarget(enemy, players);
                 enemy.Target = target?.Name;
                 var pose = enemy.Pose;
@@ -1498,6 +1671,10 @@ namespace LexArcana.Combat
         public float Reach => Kind.Reach * (Rank == EnemyRank.Boss ? 1.25f : 1f);
 
         internal string? Target { get; set; }
+        /// <summary>Fermato dalle Catene di Saturno fino a questo istante.</summary>
+        internal double StunnedUntil { get; set; }
+        /// <summary>In fuga per il Terrore di Pan fino a questo istante.</summary>
+        internal double FleeingUntil { get; set; }
         internal double NextAttackAt { get; set; }
         internal Pose LastSent { get; set; }
 
@@ -1520,6 +1697,7 @@ namespace LexArcana.Combat
             Experience = character?.Experience ?? 0;
             Level = Progression.LevelFor(Experience);
             Health = MaxHealth;
+            Resolve = MaxResolve;
         }
 
         public string Name { get; }
@@ -1529,11 +1707,25 @@ namespace LexArcana.Combat
         public bool IsDown => Health <= 0;
         internal double RespawnAt { get; set; }
         internal double NextAttackAt { get; set; }
+        internal double NextCastAt { get; set; }
+        internal double NextResolveAt { get; set; }
+        internal double AegisUntil { get; set; }
+
+        /// <summary>La Volontà: la riserva da cui si pagano i prodigi.</summary>
+        public int Resolve { get; internal set; }
+        public int MaxResolve => (_character?.Resolve ?? 6) + (Level - 1);
+        public IReadOnlyList<Spell> Spells => Grimoire.Known(_character, Level);
+        public bool Knows(Spell spell) => Spells.Contains(spell);
+
+        /// <summary>Il bonus della prova di un prodigio: attributo + abilità della tradizione + bonus di livello.</summary>
+        public int CastBonus(Tradition t) => _character is { } c ? c[Grimoire.Trait(t)] + c.SkillRank(Grimoire.Skill(t)) + LevelBonus : 0;
+        public int TraitValue(Trait t) => _character?[t] ?? 1;
 
         private int LevelBonus => (Level - 1) / 2;
 
         public int MaxHealth => (_character?.Health ?? DefaultHealth) + 3 * (Level - 1);
-        public int Defense => (_character?.Defense ?? DefaultDefense) + LevelBonus;
+        public int Defense => (_character?.Defense ?? DefaultDefense) + LevelBonus + AegisBonus;
+        internal int AegisBonus { get; set; }
         public int MeleeBonus => (_character?.CheckBonus("Armi") ?? DefaultMelee) + LevelBonus;
         public int RangedBonus => (_character?.CheckBonus("Tiro") ?? DefaultRanged) + LevelBonus;
         public int MeleeDamageBonus => (_character is { } c ? c[Trait.Robur] / 2 : 1) + LevelBonus;
@@ -1550,8 +1742,74 @@ namespace LexArcana.Combat
             if (level == Level) return false;
             Level = level;
             Health = MaxHealth;
+            Resolve = MaxResolve;
             return true;
         }
+    }
+}
+
+// ===== src/LexArcana.Core/Combat/Magic.cs =====
+namespace LexArcana.Combat
+{
+    /// <summary>Le tre vie della magia: ognuna si appoggia a un'abilità e a un attributo.</summary>
+    public enum Tradition
+    {
+        /// <summary>Incantesimi: il sapere proibito degli eruditi (Erudizione + Ingenium).</summary>
+        Incantesimi,
+        /// <summary>Miracoli divini: la grazia degli dei (Riti + Pietas).</summary>
+        Miracoli,
+        /// <summary>Invocazioni: gli spiriti, i Lari e i Mani (Presagi + Pietas).</summary>
+        Invocazioni,
+    }
+
+    /// <summary>Su chi si lancia un prodigio.</summary>
+    public enum SpellTarget { Enemy, Ally, Party, None }
+
+    /// <summary>
+    /// Un prodigio. Tier 1 si conosce subito, 2 dal livello 3, 3 dal livello 5, purché si abbia almeno un grado
+    /// nell'abilità della sua tradizione. Cost in punti Volontà; Range in metri.
+    /// </summary>
+    public sealed record Spell(string Id, string Name, Tradition Tradition, int Tier, int Cost, SpellTarget Target, float Range, string Description)
+    {
+        /// <summary>La difficoltà della prova per i prodigi che non colpiscono un nemico (per quelli, la sua Difesa).</summary>
+        public int Difficulty => 8 + 2 * Tier;
+    }
+
+    public static class Grimoire
+    {
+        public static IReadOnlyList<Spell> All { get; } =
+        [
+            new("dardo", "Dardo di luce", Tradition.Incantesimi, 1, 2, SpellTarget.Enemy, 18, "Una freccia di luce bianca: 2d6 + metà di Ingenium."),
+            new("catene", "Catene di Saturno", Tradition.Incantesimi, 2, 3, SpellTarget.Enemy, 14, "Il tempo si ferma intorno al nemico: non si muove né colpisce per 4 secondi."),
+            new("fiamma", "Fiamma di Vulcano", Tradition.Incantesimi, 3, 5, SpellTarget.Enemy, 16, "Un'esplosione di fuoco: 2d8 + metà di Ingenium a tutti i nemici entro 3 metri dal bersaglio."),
+            new("mano", "Mano di Asclepio", Tradition.Miracoli, 1, 2, SpellTarget.Ally, 12, "Guarisce un compagno, o te stesso: 2d6 + Pietas."),
+            new("egida", "Egida di Minerva", Tradition.Miracoli, 2, 3, SpellTarget.Party, 8, "+3 alla Difesa tua e dei compagni entro 8 metri, per 20 secondi."),
+            new("folgore", "Folgore di Giove", Tradition.Miracoli, 3, 5, SpellTarget.Enemy, 20, "Un fulmine dal cielo: 3d8 + Pietas."),
+            new("occhio", "Occhio dell'augure", Tradition.Invocazioni, 1, 1, SpellTarget.None, 0, "Per 15 secondi vedi tutti i nemici del luogo, anche attraverso i muri."),
+            new("esorcismo", "Esorcismo dei Mani", Tradition.Invocazioni, 2, 3, SpellTarget.Enemy, 12, "Contro lemuri e scheletri 3d6 + Pietas; contro gli altri solo 1d6."),
+            new("pan", "Terrore di Pan", Tradition.Invocazioni, 3, 4, SpellTarget.Party, 9, "I nemici entro 9 metri fuggono in preda al panico per 6 secondi."),
+        ];
+
+        public static Spell? Find(string idOrName) =>
+            All.FirstOrDefault(s => s.Id.Equals(idOrName, StringComparison.OrdinalIgnoreCase) || s.Name.Equals(idOrName, StringComparison.OrdinalIgnoreCase));
+
+        public static string Skill(Tradition t) => t switch
+        {
+            Tradition.Incantesimi => "Erudizione",
+            Tradition.Miracoli => "Riti",
+            _ => "Presagi",
+        };
+
+        public static Trait Trait(Tradition t) => t == Tradition.Incantesimi ? Characters.Trait.Ingenium : Characters.Trait.Pietas;
+
+        public static int LevelFor(int tier) => tier switch { 1 => 1, 2 => 3, _ => 5 };
+
+        /// <summary>I prodigi che un personaggio conosce al suo livello.</summary>
+        public static IReadOnlyList<Spell> Known(Character? character, int level) =>
+            character is null ? [] : [.. All.Where(s => character.SkillRank(Skill(s.Tradition)) > 0 && level >= LevelFor(s.Tier))];
+
+        /// <summary>Le creature su cui l'Esorcismo dei Mani ha pieno effetto.</summary>
+        public static bool IsUndead(EnemyKind kind) => kind.Id is "lemure" or "scheletro";
     }
 }
 
@@ -2353,6 +2611,10 @@ namespace LexArcana.Net
                     case LevelUp(var f):
                         messages.Add((new Narrated($"{f.Name} sale al livello {f.Level}: salute piena, colpi più sicuri."), null));
                         break;
+                    case Miracle m:
+                        messages.Add((new SpellCast(m.Caster, m.Spell.Id, m.Spell.Name, m.Spell.Tradition.ToString(), m.Roll, m.Total, m.Against,
+                            m.Success, m.Target, m.Amount, m.Duration, m.X, m.Z), null));
+                        break;
                     case Respawned(var f, var pose):
                         _poses[f.Name] = pose;
                         messages.Add((new Moved(f.Name, pose.X, pose.Z, pose.Yaw), null));
@@ -2374,7 +2636,7 @@ namespace LexArcana.Net
             new(e.Id, e.Kind.Id, e.Name, e.Level, e.Health, e.MaxHealth, e.Pose.X, e.Pose.Z, e.Pose.Yaw, e.Rank.ToString());
 
         private static Vitals ToVitals(Fighter f) =>
-            new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown);
+            new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown, f.Resolve, f.MaxResolve, [.. f.Spells.Select(s => s.Id)]);
 
         private async Task AcceptLoopAsync(CancellationToken ct)
         {
@@ -2522,6 +2784,7 @@ namespace LexArcana.Net
             SetSheet(var fields) => SetSheetFields(player.Name, fields),
             Embody(var character) => EmbodyAs(player, character),
             Attack(var enemyId, var ranged) => AttackWith(player, enemyId, ranged),
+            Cast(var spell, var enemyId, var ally) => CastBy(player, spell, enemyId, ally),
             ShowSheet(var owner) => Sheet(owner ?? player.Name),
             ListPlayers => new PlayerList(Present()),
             Move(var x, var z, var yaw) => MoveTo(player, new Pose(x, z, yaw)),
@@ -2598,6 +2861,18 @@ namespace LexArcana.Net
             lock (_combatLock) vitals = ToVitals(Combat.Join(player.Name, character));
             player.Send(vitals);
             return sheetReply;
+        }
+
+        private Refused? CastBy(Player player, string spell, int? enemyId, string? ally)
+        {
+            var pose = _poses.GetValueOrDefault(player.Name, Map.Spawns[0]);
+            var players = _poses.Where(p => _inWorld.ContainsKey(p.Key) || p.Key.IsSameName(player.Name)).ToDictionary(p => p.Key, p => p.Value, StringComparer.OrdinalIgnoreCase);
+            List<(ServerMessage, string?)> messages;
+            string? refusal;
+            lock (_combatLock) messages = Translate(Combat.Cast(player.Name, pose, spell, enemyId, ally, Now, players, out refusal));
+            // il bersaglio della Mano di Asclepio riceve la sua salute nuova, gli altri vedono il prodigio
+            Publish(messages);
+            return refusal is null ? null : new Refused(refusal);
         }
 
         private Refused? AttackWith(Player player, int enemyId, bool ranged)
@@ -2988,6 +3263,8 @@ namespace LexArcana.Net
               /sussurra <nome> <testo>     parla in privato (il Demiurgo sente tutto)
               /scheda [nome]               mostra la tua scheda o quella di un compagno
               /imposta <campo> [valore]    scrivi un campo della tua scheda; senza valore lo cancelli
+              /lancia <prodigio> [nome]    un prodigio su di te o su un compagno, es. /lancia mano Livia
+                                           (quelli sui nemici si lanciano nella scena 3D, con 1 2 3)
               /chi                         chi è presente
               /aiuto                       questo elenco
               /esci                        lascia la sessione
@@ -3012,6 +3289,9 @@ namespace LexArcana.Net
                 "imposta" => CommandLine.FirstWord(rest) is ({ Length: > 0 } key, var value)
                     ? new PlayerInput.Send(new SetField(key, value))
                     : new PlayerInput.Invalid("Uso: /imposta <campo> [valore], es. /imposta Ferite 2"),
+                "lancia" => CommandLine.FirstWord(rest) is ({ Length: > 0 } spell, var ally)
+                    ? new PlayerInput.Send(new Cast(spell, null, ally.Length == 0 ? null : ally))
+                    : new PlayerInput.Invalid("Uso: /lancia <prodigio> [nome], es. /lancia mano Livia"),
                 "chi" => new PlayerInput.Send(new ListPlayers()),
                 "aiuto" or "?" => new PlayerInput.ShowHelp(),
                 "esci" => new PlayerInput.Quit(),
@@ -3305,6 +3585,7 @@ namespace LexArcana.Protocol
     [JsonDerivedType(typeof(Embody), "embody")]
     [JsonDerivedType(typeof(Attack), "attack")]
     [JsonDerivedType(typeof(Command), "command")]
+    [JsonDerivedType(typeof(Cast), "cast")]
     public abstract record ClientMessage;
 
     /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -3328,6 +3609,8 @@ namespace LexArcana.Protocol
     public sealed record Attack(int EnemyId, bool Ranged = false) : ClientMessage;
     /// <summary>Un comando del Demiurgo che conduce da remoto, es. "/narra …" o "/avventura 2".</summary>
     public sealed record Command(string Line) : ClientMessage;
+    /// <summary>Lancia un prodigio (vedi Grimoire): su un nemico (EnemyId), su un compagno (Ally) o senza bersaglio.</summary>
+    public sealed record Cast(string Spell, int? EnemyId = null, string? Ally = null) : ClientMessage;
 
     /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
     [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
@@ -3348,6 +3631,7 @@ namespace LexArcana.Protocol
     [JsonDerivedType(typeof(EnemyMoves), "enemy_moves")]
     [JsonDerivedType(typeof(Struck), "struck")]
     [JsonDerivedType(typeof(Vitals), "vitals")]
+    [JsonDerivedType(typeof(SpellCast), "spell")]
     public abstract record ServerMessage;
 
     /// <summary>L'accoglienza: chi c'è, il luogo (righe della mappa) e dove si trova ognuno, te compreso.</summary>
@@ -3389,7 +3673,14 @@ namespace LexArcana.Protocol
         int Health, int MaxHealth, bool Defeated, bool Ranged = false,
         int? AttackerEnemyId = null, int? TargetEnemyId = null) : ServerMessage;
     /// <summary>Salute, livello ed esperienza di un giocatore.</summary>
-    public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down) : ServerMessage;
+    public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down,
+        int Resolve = 0, int MaxResolve = 0, string[]? Spells = null) : ServerMessage;
+    /// <summary>
+    /// Un prodigio lanciato. Spell è l'id nel grimorio, Name il nome da mostrare; Target chi lo riceve; Amount danni, cure
+    /// o quanti ne sono colpiti; Duration la durata dell'effetto in secondi; X, Z dove avviene.
+    /// </summary>
+    public sealed record SpellCast(string Caster, string Spell, string Name, string Tradition, int Roll, int Total, int Against, bool Success,
+        string? Target = null, int Amount = 0, double Duration = 0, float X = 0, float Z = 0) : ServerMessage;
 }
 
 // ===== src/LexArcana.Core/Protocol/Wire.cs =====
@@ -3488,6 +3779,9 @@ namespace LexArcana.Ui
                 case Struck s:
                     Blow(t, s);
                     break;
+                case SpellCast c:
+                    Spell(t, c);
+                    break;
                 case EnemyList(var enemies) when enemies.Length > 0:
                     t.Add($"† {enemies.Length} nemici nel luogo", Tone.Pompeian).Add(
                         $" · livello {enemies.Min(e => e.Level)}–{enemies.Max(e => e.Level)}" +
@@ -3500,6 +3794,28 @@ namespace LexArcana.Ui
         }
 
         private bool IsViewer(string name) => name.IsSameName(viewer);
+
+        private void Spell(StyledText t, SpellCast c)
+        {
+            string who = IsViewer(c.Caster) ? "Tu" : c.Caster.Sanitized;
+            var tone = c.Tradition switch { "Miracoli" => Tone.Gilt, "Invocazioni" => Tone.Verdigris, _ => Tone.Bronze };
+            t.Add("❦ ", tone).Add(who, Tone.Bronze, bold: true)
+             .Add(IsViewer(c.Caster) ? " invochi " : " invoca ", Tone.Muted).Add(c.Name.Sanitized, tone, bold: true);
+            if (c.Target is { Length: > 0 } target && c.Spell is "mano" or "catene" or "egida")
+                t.Add($" su {(IsViewer(target) ? "di te" : target.Sanitized)}", Tone.Muted);
+            t.Add($"  [{c.Roll}] {c.Total} contro {c.Against}", Tone.Muted);
+            if (!c.Success) { t.Add(": il prodigio non risponde.", Tone.Muted, italic: true); return; }
+            string effect = c.Spell switch
+            {
+                "mano" => $": +{c.Amount} salute",
+                "catene" => $": fermo per {c.Duration:0} secondi",
+                "egida" => $": +3 alla Difesa per {c.Duration:0} secondi",
+                "occhio" => $": vedi {c.Amount} nemici per {c.Duration:0} secondi",
+                "pan" => c.Amount == 0 ? ": nessun nemico abbastanza vicino" : $": {c.Amount} nemici fuggono",
+                _ => "",
+            };
+            if (effect.Length > 0) t.Add(effect, tone);
+        }
 
         private void Blow(StyledText t, Struck s)
         {
@@ -3755,6 +4071,12 @@ namespace LexArcana.Visione
 
     /// <summary>Un numero che sale e svanisce sopra chi è stato colpito.</summary>
     internal readonly record struct FloatingText(Vector3 Position, string Text, LexArcana.Ui.Tone Tone, double Time);
+
+    /// <summary>L'effetto visibile di un prodigio, che dura qualche istante.</summary>
+    internal readonly record struct SpellEffect(string Spell, Vector3 From, Vector3 To, double Time)
+    {
+        public const double Life = 0.9;
+    }
 
     /// <summary>Un dardo in volo, dal giocatore al bersaglio.</summary>
     internal readonly record struct Shot(Vector3 From, Vector3 To, double Time);
@@ -4031,11 +4353,51 @@ namespace LexArcana.Visione
             Raylib.DrawRectangleLinesEx(hp, 1, Theme.PanelEdge);
             int from = LexArcana.Combat.Progression.ExperienceFor(v.Level), to = v.NextLevel;
             float xp = to <= from ? 1 : Math.Clamp((float)(v.Experience - from) / (to - from), 0, 1);
+            if (v.MaxResolve > 0)
+            {
+                var will = new Rectangle(x, y + 32, width, 4);
+                Raylib.DrawRectangleRec(will, Theme.Basalt);
+                Raylib.DrawRectangleRec(will with { Width = width * Math.Clamp((float)v.Resolve / v.MaxResolve, 0, 1) }, Theme.Of(Tone.Verdigris));
+            }
             var xpBar = new Rectangle(x, y + 38, width, 5);
             Raylib.DrawRectangleRec(xpBar, Theme.Basalt);
             Raylib.DrawRectangleRec(xpBar with { Width = width * xp }, Theme.Of(Tone.Gilt));
-            var label = $"esperienza {v.Experience}/{to}";
+            var label = v.MaxResolve > 0 ? $"volontà {v.Resolve}/{v.MaxResolve} · esperienza {v.Experience}/{to}" : $"esperienza {v.Experience}/{to}";
             DrawText(label, new(x + width - Measure(label, 15), y + 44), 15, Theme.Of(Tone.Muted));
+        }
+
+        /// <summary>
+        /// La barra dei prodigi conosciuti: numero (il tasto), nome e costo in Volontà; spenti quelli che non ci si può permettere.
+        /// <paramref name="selected"/> è quello del pulsante PRODIGIO sugli schermi touch.
+        /// </summary>
+        public void DrawSpellBar(IReadOnlyList<LexArcana.Combat.Spell> spells, int resolve, int selected)
+        {
+            if (spells.Count == 0) return;
+            int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
+            if (Compact)
+            {
+                var s = spells[Math.Clamp(selected, 0, spells.Count - 1)];
+                var text = $"{s.Name} · {s.Cost}";
+                float tw = Measure(text, 17);
+                DrawText(text, new(w - Margin - tw, h * 0.47f), 17, Theme.Of(resolve >= s.Cost ? Tone.Verdigris : Tone.Muted));
+                return;
+            }
+            // una colonna a destra, sopra il pannello della salute: una riga per prodigio
+            float width = 330, rowHeight = 27, x = w - Margin - width;
+            float y = h - Margin - 92 - 14 - spells.Count * (rowHeight + 3);
+            for (int i = 0; i < spells.Count; i++)
+            {
+                var s = spells[i];
+                bool ok = resolve >= s.Cost;
+                var tone = s.Tradition switch { LexArcana.Combat.Tradition.Miracoli => Tone.Gilt, LexArcana.Combat.Tradition.Invocazioni => Tone.Verdigris, _ => Tone.Bronze };
+                var rect = new Rectangle(x - 12, y + i * (rowHeight + 3), width + 24, rowHeight);
+                Raylib.DrawRectangleRec(rect, Theme.WithAlpha(Theme.Panel, 170));
+                Raylib.DrawRectangleRec(rect with { Width = 3 }, Theme.Of(ok ? tone : Tone.Muted, 220));
+                DrawCaps($"{i + 1}", new(rect.X + 12, rect.Y + 6), 14, Theme.Of(ok ? tone : Tone.Muted));
+                DrawText(s.Name, new(rect.X + 34, rect.Y + 3), 19, Theme.Of(ok ? Tone.Ink : Tone.Muted, (byte)(ok ? 255 : 160)));
+                var cost = $"{s.Cost} volontà";
+                DrawText(cost, new(rect.X + rect.Width - 12 - Measure(cost, 15), rect.Y + 6), 15, Theme.Of(ok ? Tone.Verdigris : Tone.Muted));
+            }
         }
 
         /// <summary>Un bordo rosso che sfuma: sei stato colpito.</summary>
@@ -4063,7 +4425,7 @@ namespace LexArcana.Visione
         private static readonly (string Keys, string What)[] Controls =
         [
             ("W A S D", "muoviti"), ("Clic sinistro", "colpisci in mischia"), ("Clic destro", "tira a distanza"), ("Maiusc", "corri"), ("Mouse", "guarda intorno"), ("Invio · T", "parla alla compagnia"),
-            ("/", "scrivi un comando, es. /tira d20"), ("Tab", "chi è presente"), ("C", "la scheda del personaggio"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
+            ("/", "scrivi un comando, es. /tira d20"), ("1 … 9", "lancia un prodigio"), ("Tab", "chi è presente"), ("C", "la scheda del personaggio"), ("Esc", "libera o riprendi il mouse"), ("F1", "chiudi questo aiuto"),
         ];
 
         private void DrawHelp(int w, int h)
@@ -4370,7 +4732,7 @@ namespace LexArcana.Visione
     /// </summary>
     internal sealed class TouchControls(Func<double[]>? source = null)
     {
-        public enum Button { Melee, Ranged, Talk, Sheet }
+        public enum Button { Melee, Ranged, Talk, Sheet, Spell, NextSpell }
 
         private readonly Dictionary<int, (Vector2 Start, Vector2 Last, string Role)> _touches = [];
         private Vector2 _joyOrigin, _joyKnob;
@@ -4382,6 +4744,9 @@ namespace LexArcana.Visione
 
         private static float Unit => MathF.Max(48f, MathF.Min(Raylib.GetScreenWidth(), Raylib.GetScreenHeight()) * 0.11f);
 
+        /// <summary>Se il personaggio conosce prodigi: allora compaiono i pulsanti PRODIGIO e › (il successivo).</summary>
+        public static bool SpellsAvailable { get; set; }
+
         public static IEnumerable<(Button Button, Rectangle Rect, string Label)> Buttons()
         {
             int w = Raylib.GetScreenWidth(), h = Raylib.GetScreenHeight();
@@ -4390,6 +4755,11 @@ namespace LexArcana.Visione
             yield return (Button.Ranged, new Rectangle(w - u * 3.0f - gap * 2, h - u * 1.15f - gap, u * 1.3f, u * 1.15f), "TIRA");
             yield return (Button.Talk, new Rectangle(w - u * 1.6f - gap, h - u * 2.6f - gap * 2, u * 1.6f, u * 0.8f), "PARLA");
             yield return (Button.Sheet, new Rectangle(w - u * 3.0f - gap * 2, h - u * 2.6f - gap * 2, u * 1.3f, u * 0.8f), "SCHEDA");
+            if (SpellsAvailable)
+            {
+                yield return (Button.Spell, new Rectangle(w - u * 1.6f - gap, h - u * 3.6f - gap * 3, u * 1.6f, u * 0.8f), "PRODIGIO");
+                yield return (Button.NextSpell, new Rectangle(w - u * 2.5f - gap * 2, h - u * 3.6f - gap * 3, u * 0.8f, u * 0.8f), "›");
+            }
         }
 
         public void Update()
@@ -4512,6 +4882,13 @@ namespace LexArcana.Visione
         private readonly Dictionary<int, EnemyView> _enemies = [];
         private readonly List<FloatingText> _floating = [];
         private readonly List<Shot> _shots = [];
+        private readonly List<SpellEffect> _effects = [];
+        private double _revealUntil, _nextCastAt;
+        private int _selectedSpell;
+        private bool _touchSpell;
+
+        private IReadOnlyList<LexArcana.Combat.Spell> MySpells =>
+            _vitals?.Spells is { } ids ? [.. ids.Select(LexArcana.Combat.Grimoire.Find).OfType<LexArcana.Combat.Spell>()] : [];
         private Vitals? _vitals;
         private double _downSince, _hurtAt = -10, _swingAt = -10, _nextAttackAt;
         private int? _aimed;
@@ -4527,6 +4904,7 @@ namespace LexArcana.Visione
         private bool _showHelp = true, _helpPinned, _mouseCaptured = true, _quit;
         private string? _overlay;
 
+        private double _now;
         private Lighting? _lighting;
         private Hud? _hud;
         private double _start;
@@ -4591,6 +4969,7 @@ namespace LexArcana.Visione
             var lights = _lights;
             bool captured = _captured;
             double now = Raylib.GetTime() - _start;
+            _now = now;
             float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
 
             Drain(hud, lighting, now);
@@ -4601,6 +4980,8 @@ namespace LexArcana.Visione
             foreach (var gone in _enemies.Values.Where(e => e.DiedAt is { } d && now - d > 1.3).Select(e => e.Id).ToList()) _enemies.Remove(gone);
             _floating.RemoveAll(f => now - f.Time > 1.4);
             _shots.RemoveAll(s => now - s.Time > 0.2);
+            _effects.RemoveAll(e => now - e.Time > SpellEffect.Life);
+            TouchControls.SpellsAvailable = MySpells.Count > 0;
             if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
             SendPose(now);
 
@@ -4622,6 +5003,7 @@ namespace LexArcana.Visione
             foreach (var avatar in _avatars.Values) world.DrawAvatar(avatar);
             foreach (var enemy in _enemies.Values) world.DrawEnemy(enemy, now);
             foreach (var shot in _shots) world.DrawShot(shot, now);
+            foreach (var fx in _effects) world.DrawEffect(fx, now);
             if (_vitals?.Down != true)
             {
                 float swing = (float)Math.Clamp((now - _swingAt) / SwingTime, 0, 1);
@@ -4632,7 +5014,11 @@ namespace LexArcana.Visione
             DrawEnemyTags(hud, camera, eye, forward);
             foreach (var f in _floating) hud.DrawFloating(f, Raylib.GetWorldToScreen(f.Position, camera), now);
             if (now - _hurtAt < 0.5) Hud.DrawHurt((float)(1 - (now - _hurtAt) / 0.5));
-            if (_vitals is { } myVitals) hud.DrawVitals(myVitals);
+            if (_vitals is { } myVitals)
+            {
+                hud.DrawVitals(myVitals);
+                if (_overlay is null && !hud.Typing) hud.DrawSpellBar(MySpells, myVitals.Resolve, _selectedSpell);
+            }
 
             DrawNameTags(hud, camera, eye, forward);
             hud.DrawPlaceName(_map.Name);
@@ -4724,6 +5110,9 @@ namespace LexArcana.Visione
                         break;
                     case Struck s:
                         OnStruck(s, now);
+                        break;
+                    case SpellCast c:
+                        OnSpell(c, now);
                         break;
                     case Vitals v when v.Name.IsSameName(client.Name):
                         if (v.Down && _vitals?.Down != true) _downSince = now;
@@ -4891,9 +5280,16 @@ namespace LexArcana.Visione
             _pose = _map.Slide(_pose, step.X, step.Y, yaw);
             _autoRanged = distance > LexArcana.Combat.Fighter.MeleeReach;
             _autoAttack = true;
+            // prove automatiche: con poca salute si cura, da lontano usa un prodigio d'attacco se ha Volontà
+            var spells = MySpells.ToList();
+            int resolve = _vitals?.Resolve ?? 0;
+            int heal = spells.FindIndex(x => x.Id == "mano" && x.Cost <= resolve);
+            int strike = spells.FindIndex(x => x.Target == LexArcana.Combat.SpellTarget.Enemy && x.Cost <= resolve && distance <= x.Range);
+            _autoSpell = _vitals is { } v && v.Health * 2 < v.MaxHealth && heal >= 0 ? heal : _autoRanged && strike >= 0 ? strike : -1;
         }
 
         private bool _autoAttack, _autoRanged;
+        private int _autoSpell = -1;
         private bool _touchMelee, _touchRanged;
 
         /// <summary>Camminare con il joystick, guardare trascinando, pulsanti per colpire, tirare, parlare e la scheda.</summary>
@@ -4914,6 +5310,8 @@ namespace LexArcana.Visione
             if (touch.Pressed.Contains(TouchControls.Button.Melee)) _touchMelee = true;
             if (touch.Pressed.Contains(TouchControls.Button.Ranged)) _touchRanged = true;
             if (touch.Pressed.Contains(TouchControls.Button.Sheet)) _showSheet = !_showSheet;
+            if (touch.Pressed.Contains(TouchControls.Button.Spell)) _touchSpell = true;
+            if (touch.Pressed.Contains(TouchControls.Button.NextSpell) && MySpells.Count > 0) _selectedSpell = (_selectedSpell + 1) % MySpells.Count;
             if (touch.Pressed.Contains(TouchControls.Button.Talk) && options.AskText is { } ask && ask() is { Length: > 0 } line)
                 Submit(hud, line, now);
             if (touch.Pressed.Count > 0) _showHelp = false;
@@ -4933,8 +5331,76 @@ namespace LexArcana.Visione
                 .FirstOrDefault();
         }
 
+        /// <summary>I tasti da 1 a 9 (o il pulsante PRODIGIO) lanciano un prodigio sul bersaglio giusto per il suo tipo.</summary>
+        private void HandleSpells(Vector3 eye, Vector3 forward, double now)
+        {
+            var spells = MySpells;
+            int slot = -1;
+            if (_touchSpell) { slot = _selectedSpell; _touchSpell = false; }
+            else if (options.AutoFight && _autoSpell >= 0) { slot = _autoSpell; _autoSpell = -1; }
+            else if (_touch is null && !options.AutoFight)
+                for (int i = 0; i < Math.Min(9, spells.Count); i++)
+                    if (Raylib.IsKeyPressed(KeyboardKey.One + i)) slot = i;
+            if (slot < 0 || slot >= spells.Count || now < _nextCastAt) return;
+            var spell = spells[slot];
+            _nextCastAt = now + LexArcana.Combat.CombatEngine.CastCooldown;
+            if (options.AutoFight) _nextAttackAt = now + LocalCooldown; // un'azione per volta
+            switch (spell.Target)
+            {
+                case LexArcana.Combat.SpellTarget.Enemy:
+                    var target = Aim(eye, forward) ?? (_touch is not null ? AssistAim(eye, forward, spell.Range) : null);
+                    if (target is null)
+                    {
+                        _hud?.Add(new StyledText().Add($"! {spell.Name}: inquadra un nemico con il mirino.", Tone.Pompeian), now);
+                        return;
+                    }
+                    client.Send(new Cast(spell.Id, target));
+                    break;
+                case LexArcana.Combat.SpellTarget.Ally:
+                    client.Send(new Cast(spell.Id, null, AimAlly(eye, forward, spell.Range)));
+                    break;
+                default:
+                    client.Send(new Cast(spell.Id));
+                    break;
+            }
+        }
+
+        /// <summary>Il compagno sotto il mirino, se c'è e si vede; altrimenti null (il prodigio va su di sé).</summary>
+        private string? AimAlly(Vector3 eye, Vector3 forward, float range)
+        {
+            string? best = null;
+            float bestDistance = float.MaxValue;
+            foreach (var a in _avatars.Values)
+            {
+                var to = new Vector3(a.Position.X, 1.2f, a.Position.Y) - eye;
+                float d = to.Length();
+                if (d > range || d < 0.01f) continue;
+                if (MathF.Acos(Math.Clamp(Vector3.Dot(to / d, forward), -1, 1)) > MathF.Atan(0.6f / d) + 0.08f) continue;
+                if (!_map.HasLineOfSight(eye.X, eye.Z, a.Position.X, a.Position.Y)) continue;
+                if (d < bestDistance) { best = a.Name; bestDistance = d; }
+            }
+            return best;
+        }
+
+        private void OnSpell(SpellCast c, double now)
+        {
+            Vector3 casterAt = c.Caster.IsSameName(client.Name)
+                ? new Vector3(_pose.X, EyeHeight - 0.3f, _pose.Z)
+                : _avatars.TryGetValue(c.Caster, out var a) ? new Vector3(a.Position.X, 1.3f, a.Position.Y) : new Vector3(c.X, 1.3f, c.Z);
+            var targetAt = new Vector3(c.X, 1.0f, c.Z);
+            if (c.Spell == "mano" && c.Target is { } t)
+                targetAt = t.IsSameName(client.Name) ? new Vector3(_pose.X, 0, _pose.Z) : _avatars.TryGetValue(t, out var ta) ? new Vector3(ta.Position.X, 0, ta.Position.Y) : targetAt;
+            if (c.Spell == "egida") targetAt = casterAt with { Y = 0 };
+            if (!c.Success) return;
+            _effects.Add(new SpellEffect(c.Spell, casterAt, c.Spell is "pan" or "occhio" ? casterAt : targetAt, now));
+            if (c.Spell == "occhio" && c.Caster.IsSameName(client.Name)) _revealUntil = now + c.Duration;
+            if (c.Spell == "mano" && c.Amount > 0)
+                _floating.Add(new FloatingText(targetAt + new Vector3(0, 2.0f, 0), $"+{c.Amount}", Tone.Verdigris, now));
+        }
+
         private void HandleAttack(Vector3 eye, Vector3 forward, double now)
         {
+            HandleSpells(eye, forward, now);
             bool touchMelee = _touchMelee, touchRanged = _touchRanged;
             _touchMelee = _touchRanged = false;
             if (!(_mouseCaptured || options.AutoFight || _touch is not null) || now < _nextAttackAt) return;
@@ -4995,8 +5461,9 @@ namespace LexArcana.Visione
                 var head = new Vector3(e.Position.X, e.Height + 0.25f, e.Position.Y);
                 var to = head - eye;
                 float distance = to.Length();
-                if (distance > 24 || Vector3.Dot(to, forward) <= 0.2f) continue;
-                if (!_map.HasLineOfSight(eye.X, eye.Z, e.Position.X, e.Position.Y)) continue;
+                bool revealed = _now < _revealUntil;   // Occhio dell'augure: si vedono tutti, anche dietro i muri
+                if ((distance > 24 && !revealed) || Vector3.Dot(to, forward) <= 0.2f) continue;
+                if (!revealed && !_map.HasLineOfSight(eye.X, eye.Z, e.Position.X, e.Position.Y)) continue;
                 hud.DrawEnemyTag(e, Raylib.GetWorldToScreen(head, camera), distance, e.Id == _aimed);
             }
         }
@@ -5378,6 +5845,79 @@ namespace LexArcana.Visione
             Oriented(_cube, hilt + along * 0.02f, q, new(0.12f, 0.025f, 0.03f), Theme.Gilt);
             Oriented(_cube, hilt - along * 0.07f, q, new(0.025f, 0.025f, 0.12f), Theme.Basalt);
             Sphere(hilt - along * 0.14f, 0.022f, Theme.Gilt);
+        }
+
+        /// <summary>Gli effetti dei prodigi: raggi, fulmini, fuoco, cure, egide, catene, onde di terrore.</summary>
+        public void DrawEffect(SpellEffect fx, double time)
+        {
+            float k = (float)Math.Clamp((time - fx.Time) / SpellEffect.Life, 0, 1);
+            byte fade = (byte)(230 * (1 - k));
+            var verdigris = new Color((byte)0x72, (byte)0xbb, (byte)0xa8, fade);
+            _lighting.Emissive(true);
+            switch (fx.Spell)
+            {
+                case "dardo" or "esorcismo":
+                {
+                    var dir = fx.To - fx.From;
+                    float len = dir.Length();
+                    if (len < 0.01f) break;
+                    var head = fx.From + dir * MathF.Min(1, k * 2.5f);
+                    var q = Look(dir);
+                    Oriented(_cube, Vector3.Lerp(fx.From, head, 0.5f), q, new(0.06f, 0.06f, Vector3.Distance(fx.From, head)),
+                        fx.Spell == "dardo" ? Theme.WithAlpha(Theme.Marble, fade) : verdigris);
+                    Sphere(head, 0.16f, fx.Spell == "dardo" ? Theme.WithAlpha(Theme.Gilt, fade) : verdigris);
+                    break;
+                }
+                case "folgore":
+                {
+                    // il fulmine scende dal cielo a zig-zag sul bersaglio
+                    var top = fx.To + new Vector3(0, 14, 0);
+                    var prev = top;
+                    for (int i = 1; i <= 6; i++)
+                    {
+                        float t = i / 6f;
+                        var p = Vector3.Lerp(top, fx.To, t) + (i < 6 ? new Vector3(MathF.Sin(i * 7.3f) * 0.6f, 0, MathF.Cos(i * 5.1f) * 0.6f) : Vector3.Zero);
+                        Oriented(_cube, Vector3.Lerp(prev, p, 0.5f), Look(p - prev), new(0.12f, 0.12f, Vector3.Distance(prev, p)), Theme.WithAlpha(Theme.Marble, fade));
+                        prev = p;
+                    }
+                    Sphere(fx.To + new Vector3(0, 0.3f, 0), 0.6f * (1 - k), Theme.WithAlpha(Theme.Gilt, fade));
+                    break;
+                }
+                case "fiamma":
+                    Sphere(fx.To + new Vector3(0, 0.8f, 0), 0.4f + 2.6f * k, Theme.WithAlpha(Theme.Flame, (byte)(fade * 0.7f)));
+                    Sphere(fx.To + new Vector3(0, 0.8f, 0), 0.2f + 1.4f * k, Theme.WithAlpha(Theme.Gilt, fade));
+                    break;
+                case "mano":
+                    for (int i = 0; i < 10; i++)
+                    {
+                        float a = i * MathF.Tau / 10 + k * 3;
+                        var p = fx.To + new Vector3(MathF.Cos(a) * 0.45f, 0.2f + k * 1.8f + (i % 3) * 0.2f, MathF.Sin(a) * 0.45f);
+                        Sphere(p, 0.05f, verdigris);
+                    }
+                    break;
+                case "egida":
+                    Cylinder(fx.To + new Vector3(0, 0.05f, 0), 0.6f + 7.4f * k, 0.06f, Theme.WithAlpha(Theme.Gilt, (byte)(fade * 0.6f)));
+                    Cylinder(fx.From + new Vector3(0, 0.05f, 0), 0.9f, 2.0f * (1 - k), Theme.WithAlpha(Theme.Gilt, (byte)(fade * 0.25f)));
+                    break;
+                case "catene":
+                    for (int i = 0; i < 3; i++)
+                        Cylinder(fx.To + new Vector3(0, 0.4f + i * 0.5f, 0), 0.55f, 0.08f, Theme.WithAlpha(Theme.Basalt, (byte)Math.Max(fade, (byte)120)));
+                    break;
+                case "pan":
+                    Cylinder(fx.From + new Vector3(0, 0.05f, 0), 0.5f + 8.5f * k, 0.1f, verdigris);
+                    break;
+                case "occhio":
+                    Sphere(fx.From + new Vector3(0, 1.9f, 0), 0.25f + 0.4f * k, Theme.WithAlpha(Theme.Gilt, fade));
+                    break;
+            }
+            _lighting.Emissive(false);
+        }
+
+        private static Quaternion Look(Vector3 dir)
+        {
+            dir = Vector3.Normalize(dir);
+            float yaw = MathF.Atan2(dir.X, dir.Z), pitch = MathF.Asin(Math.Clamp(dir.Y, -1, 1));
+            return Quaternion.Concatenate(Quaternion.CreateFromAxisAngle(Vector3.UnitX, -pitch), Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw));
         }
 
         public void DrawShot(Shot shot, double time)

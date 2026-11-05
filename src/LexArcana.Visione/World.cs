@@ -242,6 +242,79 @@ internal sealed unsafe class World : IDisposable
         Sphere(hilt - along * 0.14f, 0.022f, Theme.Gilt);
     }
 
+    /// <summary>Gli effetti dei prodigi: raggi, fulmini, fuoco, cure, egide, catene, onde di terrore.</summary>
+    public void DrawEffect(SpellEffect fx, double time)
+    {
+        float k = (float)Math.Clamp((time - fx.Time) / SpellEffect.Life, 0, 1);
+        byte fade = (byte)(230 * (1 - k));
+        var verdigris = new Color((byte)0x72, (byte)0xbb, (byte)0xa8, fade);
+        _lighting.Emissive(true);
+        switch (fx.Spell)
+        {
+            case "dardo" or "esorcismo":
+            {
+                var dir = fx.To - fx.From;
+                float len = dir.Length();
+                if (len < 0.01f) break;
+                var head = fx.From + dir * MathF.Min(1, k * 2.5f);
+                var q = Look(dir);
+                Oriented(_cube, Vector3.Lerp(fx.From, head, 0.5f), q, new(0.06f, 0.06f, Vector3.Distance(fx.From, head)),
+                    fx.Spell == "dardo" ? Theme.WithAlpha(Theme.Marble, fade) : verdigris);
+                Sphere(head, 0.16f, fx.Spell == "dardo" ? Theme.WithAlpha(Theme.Gilt, fade) : verdigris);
+                break;
+            }
+            case "folgore":
+            {
+                // il fulmine scende dal cielo a zig-zag sul bersaglio
+                var top = fx.To + new Vector3(0, 14, 0);
+                var prev = top;
+                for (int i = 1; i <= 6; i++)
+                {
+                    float t = i / 6f;
+                    var p = Vector3.Lerp(top, fx.To, t) + (i < 6 ? new Vector3(MathF.Sin(i * 7.3f) * 0.6f, 0, MathF.Cos(i * 5.1f) * 0.6f) : Vector3.Zero);
+                    Oriented(_cube, Vector3.Lerp(prev, p, 0.5f), Look(p - prev), new(0.12f, 0.12f, Vector3.Distance(prev, p)), Theme.WithAlpha(Theme.Marble, fade));
+                    prev = p;
+                }
+                Sphere(fx.To + new Vector3(0, 0.3f, 0), 0.6f * (1 - k), Theme.WithAlpha(Theme.Gilt, fade));
+                break;
+            }
+            case "fiamma":
+                Sphere(fx.To + new Vector3(0, 0.8f, 0), 0.4f + 2.6f * k, Theme.WithAlpha(Theme.Flame, (byte)(fade * 0.7f)));
+                Sphere(fx.To + new Vector3(0, 0.8f, 0), 0.2f + 1.4f * k, Theme.WithAlpha(Theme.Gilt, fade));
+                break;
+            case "mano":
+                for (int i = 0; i < 10; i++)
+                {
+                    float a = i * MathF.Tau / 10 + k * 3;
+                    var p = fx.To + new Vector3(MathF.Cos(a) * 0.45f, 0.2f + k * 1.8f + (i % 3) * 0.2f, MathF.Sin(a) * 0.45f);
+                    Sphere(p, 0.05f, verdigris);
+                }
+                break;
+            case "egida":
+                Cylinder(fx.To + new Vector3(0, 0.05f, 0), 0.6f + 7.4f * k, 0.06f, Theme.WithAlpha(Theme.Gilt, (byte)(fade * 0.6f)));
+                Cylinder(fx.From + new Vector3(0, 0.05f, 0), 0.9f, 2.0f * (1 - k), Theme.WithAlpha(Theme.Gilt, (byte)(fade * 0.25f)));
+                break;
+            case "catene":
+                for (int i = 0; i < 3; i++)
+                    Cylinder(fx.To + new Vector3(0, 0.4f + i * 0.5f, 0), 0.55f, 0.08f, Theme.WithAlpha(Theme.Basalt, (byte)Math.Max(fade, (byte)120)));
+                break;
+            case "pan":
+                Cylinder(fx.From + new Vector3(0, 0.05f, 0), 0.5f + 8.5f * k, 0.1f, verdigris);
+                break;
+            case "occhio":
+                Sphere(fx.From + new Vector3(0, 1.9f, 0), 0.25f + 0.4f * k, Theme.WithAlpha(Theme.Gilt, fade));
+                break;
+        }
+        _lighting.Emissive(false);
+    }
+
+    private static Quaternion Look(Vector3 dir)
+    {
+        dir = Vector3.Normalize(dir);
+        float yaw = MathF.Atan2(dir.X, dir.Z), pitch = MathF.Asin(Math.Clamp(dir.Y, -1, 1));
+        return Quaternion.Concatenate(Quaternion.CreateFromAxisAngle(Vector3.UnitX, -pitch), Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw));
+    }
+
     public void DrawShot(Shot shot, double time)
     {
         float k = (float)Math.Clamp((time - shot.Time) / 0.18, 0, 1);

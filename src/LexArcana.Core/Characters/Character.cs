@@ -94,6 +94,13 @@ public sealed record Character
         yield return ("Difesa", Defense.ToString(System.Globalization.CultureInfo.InvariantCulture));
         yield return ("Abilità", string.Join(", ", Rules.Skills.Where(s => SkillRank(s.Name) > 0).Select(s => $"{s.Name} +{CheckBonus(s.Name)}")));
         yield return ("Equipaggiamento", string.Join(", ", VocationInfo.Equipment));
+        var spells = Combat.Grimoire.All.Where(s => SkillRank(Combat.Grimoire.Skill(s.Tradition)) > 0).ToList();
+        if (spells.Count > 0)
+        {
+            var known = spells.Where(s => Level >= Combat.Grimoire.LevelFor(s.Tier)).Select(s => s.Name).ToList();
+            int later = spells.Count - known.Count;
+            yield return ("Magia", string.Join(", ", known) + (later > 0 ? $" · altri {later} salendo di livello" : ""));
+        }
         if (Concept.Length > 0) yield return ("Concetto", Concept);
     }
 

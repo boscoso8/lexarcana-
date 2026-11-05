@@ -26,6 +26,13 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
     private readonly Dictionary<int, EnemyView> _enemies = [];
     private readonly List<FloatingText> _floating = [];
     private readonly List<Shot> _shots = [];
+    private readonly List<SpellEffect> _effects = [];
+    private double _revealUntil, _nextCastAt;
+    private int _selectedSpell;
+    private bool _touchSpell;
+
+    private IReadOnlyList<LexArcana.Combat.Spell> MySpells =>
+        _vitals?.Spells is { } ids ? [.. ids.Select(LexArcana.Combat.Grimoire.Find).OfType<LexArcana.Combat.Spell>()] : [];
     private Vitals? _vitals;
     private double _downSince, _hurtAt = -10, _swingAt = -10, _nextAttackAt;
     private int? _aimed;
@@ -41,6 +48,7 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
     private bool _showHelp = true, _helpPinned, _mouseCaptured = true, _quit;
     private string? _overlay;
 
+    private double _now;
     private Lighting? _lighting;
     private Hud? _hud;
     private double _start;
@@ -105,6 +113,7 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         var lights = _lights;
         bool captured = _captured;
         double now = Raylib.GetTime() - _start;
+        _now = now;
         float dt = MathF.Min(Raylib.GetFrameTime(), 0.1f);
 
         Drain(hud, lighting, now);
@@ -115,6 +124,8 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         foreach (var gone in _enemies.Values.Where(e => e.DiedAt is { } d && now - d > 1.3).Select(e => e.Id).ToList()) _enemies.Remove(gone);
         _floating.RemoveAll(f => now - f.Time > 1.4);
         _shots.RemoveAll(s => now - s.Time > 0.2);
+        _effects.RemoveAll(e => now - e.Time > SpellEffect.Life);
+        TouchControls.SpellsAvailable = MySpells.Count > 0;
         if (_showHelp && (now > 12 || _pose.DistanceTo(_lastSent) > 0.05f || hud.Typing || options.CapturePath is not null)) _showHelp = _helpPinned;
         SendPose(now);
 
@@ -136,6 +147,7 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         foreach (var avatar in _avatars.Values) world.DrawAvatar(avatar);
         foreach (var enemy in _enemies.Values) world.DrawEnemy(enemy, now);
         foreach (var shot in _shots) world.DrawShot(shot, now);
+        foreach (var fx in _effects) world.DrawEffect(fx, now);
         if (_vitals?.Down != true)
         {
             float swing = (float)Math.Clamp((now - _swingAt) / SwingTime, 0, 1);
@@ -146,7 +158,11 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         DrawEnemyTags(hud, camera, eye, forward);
         foreach (var f in _floating) hud.DrawFloating(f, Raylib.GetWorldToScreen(f.Position, camera), now);
         if (now - _hurtAt < 0.5) Hud.DrawHurt((float)(1 - (now - _hurtAt) / 0.5));
-        if (_vitals is { } myVitals) hud.DrawVitals(myVitals);
+        if (_vitals is { } myVitals)
+        {
+            hud.DrawVitals(myVitals);
+            if (_overlay is null && !hud.Typing) hud.DrawSpellBar(MySpells, myVitals.Resolve, _selectedSpell);
+        }
 
         DrawNameTags(hud, camera, eye, forward);
         hud.DrawPlaceName(_map.Name);
@@ -238,6 +254,9 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
                     break;
                 case Struck s:
                     OnStruck(s, now);
+                    break;
+                case SpellCast c:
+                    OnSpell(c, now);
                     break;
                 case Vitals v when v.Name.IsSameName(client.Name):
                     if (v.Down && _vitals?.Down != true) _downSince = now;
@@ -405,9 +424,16 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         _pose = _map.Slide(_pose, step.X, step.Y, yaw);
         _autoRanged = distance > LexArcana.Combat.Fighter.MeleeReach;
         _autoAttack = true;
+        // prove automatiche: con poca salute si cura, da lontano usa un prodigio d'attacco se ha Volontà
+        var spells = MySpells.ToList();
+        int resolve = _vitals?.Resolve ?? 0;
+        int heal = spells.FindIndex(x => x.Id == "mano" && x.Cost <= resolve);
+        int strike = spells.FindIndex(x => x.Target == LexArcana.Combat.SpellTarget.Enemy && x.Cost <= resolve && distance <= x.Range);
+        _autoSpell = _vitals is { } v && v.Health * 2 < v.MaxHealth && heal >= 0 ? heal : _autoRanged && strike >= 0 ? strike : -1;
     }
 
     private bool _autoAttack, _autoRanged;
+    private int _autoSpell = -1;
     private bool _touchMelee, _touchRanged;
 
     /// <summary>Camminare con il joystick, guardare trascinando, pulsanti per colpire, tirare, parlare e la scheda.</summary>
@@ -428,6 +454,8 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         if (touch.Pressed.Contains(TouchControls.Button.Melee)) _touchMelee = true;
         if (touch.Pressed.Contains(TouchControls.Button.Ranged)) _touchRanged = true;
         if (touch.Pressed.Contains(TouchControls.Button.Sheet)) _showSheet = !_showSheet;
+        if (touch.Pressed.Contains(TouchControls.Button.Spell)) _touchSpell = true;
+        if (touch.Pressed.Contains(TouchControls.Button.NextSpell) && MySpells.Count > 0) _selectedSpell = (_selectedSpell + 1) % MySpells.Count;
         if (touch.Pressed.Contains(TouchControls.Button.Talk) && options.AskText is { } ask && ask() is { Length: > 0 } line)
             Submit(hud, line, now);
         if (touch.Pressed.Count > 0) _showHelp = false;
@@ -447,8 +475,76 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
             .FirstOrDefault();
     }
 
+    /// <summary>I tasti da 1 a 9 (o il pulsante PRODIGIO) lanciano un prodigio sul bersaglio giusto per il suo tipo.</summary>
+    private void HandleSpells(Vector3 eye, Vector3 forward, double now)
+    {
+        var spells = MySpells;
+        int slot = -1;
+        if (_touchSpell) { slot = _selectedSpell; _touchSpell = false; }
+        else if (options.AutoFight && _autoSpell >= 0) { slot = _autoSpell; _autoSpell = -1; }
+        else if (_touch is null && !options.AutoFight)
+            for (int i = 0; i < Math.Min(9, spells.Count); i++)
+                if (Raylib.IsKeyPressed(KeyboardKey.One + i)) slot = i;
+        if (slot < 0 || slot >= spells.Count || now < _nextCastAt) return;
+        var spell = spells[slot];
+        _nextCastAt = now + LexArcana.Combat.CombatEngine.CastCooldown;
+        if (options.AutoFight) _nextAttackAt = now + LocalCooldown; // un'azione per volta
+        switch (spell.Target)
+        {
+            case LexArcana.Combat.SpellTarget.Enemy:
+                var target = Aim(eye, forward) ?? (_touch is not null ? AssistAim(eye, forward, spell.Range) : null);
+                if (target is null)
+                {
+                    _hud?.Add(new StyledText().Add($"! {spell.Name}: inquadra un nemico con il mirino.", Tone.Pompeian), now);
+                    return;
+                }
+                client.Send(new Cast(spell.Id, target));
+                break;
+            case LexArcana.Combat.SpellTarget.Ally:
+                client.Send(new Cast(spell.Id, null, AimAlly(eye, forward, spell.Range)));
+                break;
+            default:
+                client.Send(new Cast(spell.Id));
+                break;
+        }
+    }
+
+    /// <summary>Il compagno sotto il mirino, se c'è e si vede; altrimenti null (il prodigio va su di sé).</summary>
+    private string? AimAlly(Vector3 eye, Vector3 forward, float range)
+    {
+        string? best = null;
+        float bestDistance = float.MaxValue;
+        foreach (var a in _avatars.Values)
+        {
+            var to = new Vector3(a.Position.X, 1.2f, a.Position.Y) - eye;
+            float d = to.Length();
+            if (d > range || d < 0.01f) continue;
+            if (MathF.Acos(Math.Clamp(Vector3.Dot(to / d, forward), -1, 1)) > MathF.Atan(0.6f / d) + 0.08f) continue;
+            if (!_map.HasLineOfSight(eye.X, eye.Z, a.Position.X, a.Position.Y)) continue;
+            if (d < bestDistance) { best = a.Name; bestDistance = d; }
+        }
+        return best;
+    }
+
+    private void OnSpell(SpellCast c, double now)
+    {
+        Vector3 casterAt = c.Caster.IsSameName(client.Name)
+            ? new Vector3(_pose.X, EyeHeight - 0.3f, _pose.Z)
+            : _avatars.TryGetValue(c.Caster, out var a) ? new Vector3(a.Position.X, 1.3f, a.Position.Y) : new Vector3(c.X, 1.3f, c.Z);
+        var targetAt = new Vector3(c.X, 1.0f, c.Z);
+        if (c.Spell == "mano" && c.Target is { } t)
+            targetAt = t.IsSameName(client.Name) ? new Vector3(_pose.X, 0, _pose.Z) : _avatars.TryGetValue(t, out var ta) ? new Vector3(ta.Position.X, 0, ta.Position.Y) : targetAt;
+        if (c.Spell == "egida") targetAt = casterAt with { Y = 0 };
+        if (!c.Success) return;
+        _effects.Add(new SpellEffect(c.Spell, casterAt, c.Spell is "pan" or "occhio" ? casterAt : targetAt, now));
+        if (c.Spell == "occhio" && c.Caster.IsSameName(client.Name)) _revealUntil = now + c.Duration;
+        if (c.Spell == "mano" && c.Amount > 0)
+            _floating.Add(new FloatingText(targetAt + new Vector3(0, 2.0f, 0), $"+{c.Amount}", Tone.Verdigris, now));
+    }
+
     private void HandleAttack(Vector3 eye, Vector3 forward, double now)
     {
+        HandleSpells(eye, forward, now);
         bool touchMelee = _touchMelee, touchRanged = _touchRanged;
         _touchMelee = _touchRanged = false;
         if (!(_mouseCaptured || options.AutoFight || _touch is not null) || now < _nextAttackAt) return;
@@ -509,8 +605,9 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
             var head = new Vector3(e.Position.X, e.Height + 0.25f, e.Position.Y);
             var to = head - eye;
             float distance = to.Length();
-            if (distance > 24 || Vector3.Dot(to, forward) <= 0.2f) continue;
-            if (!_map.HasLineOfSight(eye.X, eye.Z, e.Position.X, e.Position.Y)) continue;
+            bool revealed = _now < _revealUntil;   // Occhio dell'augure: si vedono tutti, anche dietro i muri
+            if ((distance > 24 && !revealed) || Vector3.Dot(to, forward) <= 0.2f) continue;
+            if (!revealed && !_map.HasLineOfSight(eye.X, eye.Z, e.Position.X, e.Position.Y)) continue;
             hud.DrawEnemyTag(e, Raylib.GetWorldToScreen(head, camera), distance, e.Id == _aimed);
         }
     }

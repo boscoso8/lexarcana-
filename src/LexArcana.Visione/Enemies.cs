@@ -42,5 +42,11 @@ internal sealed class EnemyView(EnemyInfo info)
 /// <summary>Un numero che sale e svanisce sopra chi è stato colpito.</summary>
 internal readonly record struct FloatingText(Vector3 Position, string Text, LexArcana.Ui.Tone Tone, double Time);
 
+/// <summary>L'effetto visibile di un prodigio, che dura qualche istante.</summary>
+internal readonly record struct SpellEffect(string Spell, Vector3 From, Vector3 To, double Time)
+{
+    public const double Life = 0.9;
+}
+
 /// <summary>Un dardo in volo, dal giocatore al bersaglio.</summary>
 internal readonly record struct Shot(Vector3 From, Vector3 To, double Time);

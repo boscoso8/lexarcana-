@@ -16,6 +16,9 @@ public sealed record Blow(
 public sealed record VitalsChanged(Fighter Fighter) : CombatEvent;
 public sealed record LevelUp(Fighter Fighter) : CombatEvent;
 public sealed record Respawned(Fighter Fighter, Pose Pose) : CombatEvent;
+/// <summary>Un prodigio lanciato, riuscito o no. Target è chi ne riceve l'effetto; X, Z dove avviene (per gli effetti visivi).</summary>
+public sealed record Miracle(string Caster, Spell Spell, int Roll, int Total, int Against, bool Success,
+    string? Target, int Amount, double Duration, float X, float Z) : CombatEvent;
 
 /// <summary>
 /// Il combattimento, tutto lato server: dove sono i nemici, chi inseguono, chi colpisce chi.
@@ -131,18 +134,153 @@ public sealed class CombatEngine(Dice dice, GameMap map)
         events.Add(new Blow(fighter.Name, null, enemy.Label, enemy.Id, roll, total, enemy.Defense, hit, critical, damage,
             enemy.Health, enemy.MaxHealth, enemy.IsDead, ranged));
 
-        if (enemy.IsDead)
+        if (enemy.IsDead) Defeat(enemy, events);
+        return events;
+    }
+
+    /// <summary>Un nemico sconfitto: sparisce e l'esperienza va a tutto il gruppo, perché si combatte insieme.</summary>
+    private void Defeat(Enemy enemy, List<CombatEvent> events)
+    {
+        _enemies.Remove(enemy.Id);
+        foreach (var f in _fighters.Values)
         {
-            _enemies.Remove(enemy.Id);
-            // l'esperienza va a tutto il gruppo: si combatte insieme
-            foreach (var f in _fighters.Values)
+            bool levelled = f.Gain(enemy.Experience);
+            events.Add(new VitalsChanged(f));
+            if (levelled) events.Add(new LevelUp(f));
+        }
+    }
+
+    public const double CastCooldown = 1.2, ResolveRegenEvery = 5;
+
+    /// <summary>
+    /// Un prodigio. La prova è d20 + attributo + abilità della tradizione: contro la Difesa del nemico se lo colpisce,
+    /// altrimenti contro la difficoltà del prodigio. La Volontà si spende comunque, anche se la prova fallisce.
+    /// <paramref name="players"/> sono le posizioni dei giocatori nella scena, per i prodigi su compagni e gruppo.
+    /// </summary>
+    public List<CombatEvent> Cast(string caster, Pose from, string spellId, int? enemyId, string? ally, double now,
+        IReadOnlyDictionary<string, Pose> players, out string? refusal)
+    {
+        List<CombatEvent> events = [];
+        refusal = null;
+        if (FighterOf(caster) is not { } fighter) { refusal = "Non sei in gioco."; return events; }
+        if (Grimoire.Find(spellId) is not { } spell) { refusal = $"Non esiste un prodigio «{spellId}»."; return events; }
+        if (!fighter.Knows(spell))
+        {
+            refusal = $"Non conosci {spell.Name}: serve un grado in {Grimoire.Skill(spell.Tradition)} e il livello {Grimoire.LevelFor(spell.Tier)}.";
+            return events;
+        }
+        if (fighter.IsDown) { refusal = "Sei a terra: aspetta di rialzarti."; return events; }
+        if (now < fighter.NextCastAt) return events;
+        if (fighter.Resolve < spell.Cost) { refusal = $"Ti manca la Volontà: {spell.Name} costa {spell.Cost}, ne hai {fighter.Resolve}."; return events; }
+
+        Enemy? enemy = null;
+        Fighter? friend = null;
+        Pose at = from;
+        switch (spell.Target)
+        {
+            case SpellTarget.Enemy:
+                if (enemyId is not { } id || EnemyOf(id) is not { IsDead: false } e) { refusal = $"{spell.Name} va lanciato su un nemico."; return events; }
+                if (Distance(from.X, from.Z, e.Pose.X, e.Pose.Z) > spell.Range) { refusal = $"Troppo lontano per {spell.Name} (al massimo {spell.Range:0} metri)."; return events; }
+                if (!Map.HasLineOfSight(from.X, from.Z, e.Pose.X, e.Pose.Z)) { refusal = "Non vedi il bersaglio."; return events; }
+                enemy = e;
+                at = e.Pose;
+                break;
+            case SpellTarget.Ally:
+                friend = ally is null || ally.IsSameName(caster) ? fighter : FighterOf(ally);
+                if (friend is null || friend.IsDown) { refusal = "Quel compagno non può ricevere il prodigio."; return events; }
+                if (friend != fighter)
+                {
+                    if (!players.TryGetValue(friend.Name, out var p) || Distance(from.X, from.Z, p.X, p.Z) > spell.Range)
+                    { refusal = $"{friend.Name} è troppo lontano (al massimo {spell.Range:0} metri)."; return events; }
+                    at = p;
+                }
+                break;
+        }
+
+        fighter.NextCastAt = now + CastCooldown;
+        fighter.Resolve -= spell.Cost;
+        int against = enemy?.Defense ?? spell.Difficulty;
+        var (roll, total, success, critical) = Resolve(fighter.CastBonus(spell.Tradition), against);
+        int pietas = fighter.TraitValue(Characters.Trait.Pietas), ingenium = fighter.TraitValue(Characters.Trait.Ingenium);
+        int amount = 0;
+        double duration = 0;
+        string? target = enemy?.Label ?? friend?.Name;
+
+        if (success)
+            switch (spell.Id)
             {
-                bool levelled = f.Gain(enemy.Experience);
-                events.Add(new VitalsChanged(f));
-                if (levelled) events.Add(new LevelUp(f));
+                case "dardo":
+                    amount = Damage(2, 6, critical) + ingenium / 2;
+                    break;
+                case "catene":
+                    duration = enemy!.Rank == EnemyRank.Boss ? 2 : 4;
+                    enemy.StunnedUntil = now + duration;
+                    break;
+                case "fiamma":
+                    amount = Damage(2, 8, critical) + ingenium / 2;
+                    break;
+                case "mano":
+                    amount = Math.Min(Damage(2, 6, critical) + pietas, friend!.MaxHealth - friend.Health);
+                    friend.Health += amount;
+                    events.Add(new VitalsChanged(friend));
+                    break;
+                case "egida":
+                    duration = 20;
+                    foreach (var f in _fighters.Values.Where(f => !f.IsDown && (f == fighter ||
+                                 players.TryGetValue(f.Name, out var p) && Distance(from.X, from.Z, p.X, p.Z) <= spell.Range)))
+                    {
+                        f.AegisBonus = 3;
+                        f.AegisUntil = now + duration;
+                        amount++;
+                    }
+                    target = amount == 1 ? caster : $"{amount} compagni";
+                    break;
+                case "folgore":
+                    amount = Damage(3, 8, critical) + pietas;
+                    break;
+                case "occhio":
+                    duration = 15;
+                    amount = _enemies.Count;
+                    break;
+                case "esorcismo":
+                    amount = Grimoire.IsUndead(enemy!.Kind) ? Damage(3, 6, critical) + pietas : Damage(1, 6, critical);
+                    break;
+                case "pan":
+                    duration = 6;
+                    foreach (var e in _enemies.Values.Where(e => e.Rank != EnemyRank.Boss && Distance(from.X, from.Z, e.Pose.X, e.Pose.Z) <= spell.Range))
+                    {
+                        e.FleeingUntil = now + duration;
+                        e.Target = null;
+                        amount++;
+                    }
+                    break;
+            }
+
+        events.Add(new Miracle(caster, spell, roll, total, against, success, target, amount, duration, at.X, at.Z));
+        events.Add(new VitalsChanged(fighter));
+
+        // i danni: al bersaglio, o a tutti quelli vicini per la Fiamma di Vulcano
+        if (success && enemy is not null && amount > 0 && spell.Id is "dardo" or "fiamma" or "folgore" or "esorcismo")
+        {
+            var hit = spell.Id == "fiamma"
+                ? _enemies.Values.Where(e => Distance(at.X, at.Z, e.Pose.X, e.Pose.Z) <= 3f).ToList()
+                : [enemy];
+            foreach (var e in hit)
+            {
+                e.Health = Math.Max(0, e.Health - amount);
+                e.Target ??= fighter.Name;
+                events.Add(new Blow(fighter.Name, null, e.Label, e.Id, roll, total, against, true, critical, amount, e.Health, e.MaxHealth, e.IsDead, true));
+                if (e.IsDead) Defeat(e, events);
             }
         }
         return events;
+
+        int Damage(int count, int sides, bool crit)
+        {
+            int sum = 0;
+            for (int i = 0; i < count * (crit ? 2 : 1); i++) sum += dice.D(sides);
+            return sum;
+        }
     }
 
     /// <summary>
@@ -153,9 +291,23 @@ public sealed class CombatEngine(Dice dice, GameMap map)
     {
         List<CombatEvent> events = [];
 
+        foreach (var f in _fighters.Values)
+        {
+            if (f.AegisBonus > 0 && now >= f.AegisUntil) f.AegisBonus = 0;
+            if (f.IsDown || f.Resolve >= f.MaxResolve) { f.NextResolveAt = now + ResolveRegenEvery; continue; }
+            if (f.NextResolveAt == 0) f.NextResolveAt = now + ResolveRegenEvery;
+            if (now >= f.NextResolveAt)
+            {
+                f.Resolve++;
+                f.NextResolveAt = now + ResolveRegenEvery;
+                events.Add(new VitalsChanged(f));
+            }
+        }
+
         foreach (var f in _fighters.Values.Where(f => f.IsDown && f.RespawnAt > 0 && now >= f.RespawnAt))
         {
             f.Health = f.MaxHealth;
+            f.Resolve = f.MaxResolve;
             f.RespawnAt = 0;
             events.Add(new Respawned(f, Map.Spawns[Math.Abs(f.Name.GetHashCode(StringComparison.OrdinalIgnoreCase)) % Map.Spawns.Length]));
             events.Add(new VitalsChanged(f));
@@ -164,6 +316,20 @@ public sealed class CombatEngine(Dice dice, GameMap map)
         List<Enemy> moved = [];
         foreach (var enemy in _enemies.Values)
         {
+            if (now < enemy.StunnedUntil) continue; // fermo nelle Catene di Saturno
+            if (now < enemy.FleeingUntil)
+            {
+                // Terrore di Pan: scappa dal giocatore più vicino
+                var near = players.Values.OrderBy(p => Distance(p.X, p.Z, enemy.Pose.X, enemy.Pose.Z)).Cast<Pose?>().FirstOrDefault();
+                if (near is { } n)
+                {
+                    float fx = enemy.Pose.X - n.X, fz = enemy.Pose.Z - n.Z, fd = MathF.Max(MathF.Sqrt(fx * fx + fz * fz), 0.001f);
+                    float step = enemy.Kind.Speed * dt / fd;
+                    enemy.Pose = Map.Slide(enemy.Pose, fx * step, fz * step, MathF.Atan2(fx, fz));
+                    if (Distance(enemy.Pose.X, enemy.Pose.Z, enemy.LastSent.X, enemy.LastSent.Z) > 0.03f) { enemy.LastSent = enemy.Pose; moved.Add(enemy); }
+                }
+                continue;
+            }
             var target = ChooseTarget(enemy, players);
             enemy.Target = target?.Name;
             var pose = enemy.Pose;

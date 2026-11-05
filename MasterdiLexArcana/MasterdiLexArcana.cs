@@ -1,6 +1,6 @@
 // MasterdiLexArcana.cs — gli strumenti del Master (il Demiurgo) di Lex Arcana in un solo file.
 // Generato da tools/GeneraRed3D.cs: non modificarlo a mano, modifica i sorgenti in src/ e rigeneralo.
-// Contiene 39 file sorgente. Compila con MasterdiLexArcana.csproj (net10.0, C# 14, nessuna dipendenza esterna).
+// Contiene 40 file sorgente. Compila con MasterdiLexArcana.csproj (net10.0, C# 14, nessuna dipendenza esterna).
 //
 // Prepara: campagna --seme 42 · personaggio --nome Aurelia · Conduci: server --campagna <campagna.json> --porta-web 8080 --parola-demiurgo <testo> · Da remoto: client --host https://<tavolo> --nome Demiurgo
 // I giocatori entrano con il browser (anche iPhone), con Red3D.cs (3D) o con il client da terminale.
@@ -805,6 +805,13 @@ namespace LexArcana.Characters
             yield return ("Difesa", Defense.ToString(System.Globalization.CultureInfo.InvariantCulture));
             yield return ("Abilità", string.Join(", ", Rules.Skills.Where(s => SkillRank(s.Name) > 0).Select(s => $"{s.Name} +{CheckBonus(s.Name)}")));
             yield return ("Equipaggiamento", string.Join(", ", VocationInfo.Equipment));
+            var spells = Combat.Grimoire.All.Where(s => SkillRank(Combat.Grimoire.Skill(s.Tradition)) > 0).ToList();
+            if (spells.Count > 0)
+            {
+                var known = spells.Where(s => Level >= Combat.Grimoire.LevelFor(s.Tier)).Select(s => s.Name).ToList();
+                int later = spells.Count - known.Count;
+                yield return ("Magia", string.Join(", ", known) + (later > 0 ? $" · altri {later} salendo di livello" : ""));
+            }
             if (Concept.Length > 0) yield return ("Concetto", Concept);
         }
 
@@ -1191,6 +1198,9 @@ namespace LexArcana.Combat
     public sealed record VitalsChanged(Fighter Fighter) : CombatEvent;
     public sealed record LevelUp(Fighter Fighter) : CombatEvent;
     public sealed record Respawned(Fighter Fighter, Pose Pose) : CombatEvent;
+    /// <summary>Un prodigio lanciato, riuscito o no. Target è chi ne riceve l'effetto; X, Z dove avviene (per gli effetti visivi).</summary>
+    public sealed record Miracle(string Caster, Spell Spell, int Roll, int Total, int Against, bool Success,
+        string? Target, int Amount, double Duration, float X, float Z) : CombatEvent;
 
     /// <summary>
     /// Il combattimento, tutto lato server: dove sono i nemici, chi inseguono, chi colpisce chi.
@@ -1306,18 +1316,153 @@ namespace LexArcana.Combat
             events.Add(new Blow(fighter.Name, null, enemy.Label, enemy.Id, roll, total, enemy.Defense, hit, critical, damage,
                 enemy.Health, enemy.MaxHealth, enemy.IsDead, ranged));
 
-            if (enemy.IsDead)
+            if (enemy.IsDead) Defeat(enemy, events);
+            return events;
+        }
+
+        /// <summary>Un nemico sconfitto: sparisce e l'esperienza va a tutto il gruppo, perché si combatte insieme.</summary>
+        private void Defeat(Enemy enemy, List<CombatEvent> events)
+        {
+            _enemies.Remove(enemy.Id);
+            foreach (var f in _fighters.Values)
             {
-                _enemies.Remove(enemy.Id);
-                // l'esperienza va a tutto il gruppo: si combatte insieme
-                foreach (var f in _fighters.Values)
+                bool levelled = f.Gain(enemy.Experience);
+                events.Add(new VitalsChanged(f));
+                if (levelled) events.Add(new LevelUp(f));
+            }
+        }
+
+        public const double CastCooldown = 1.2, ResolveRegenEvery = 5;
+
+        /// <summary>
+        /// Un prodigio. La prova è d20 + attributo + abilità della tradizione: contro la Difesa del nemico se lo colpisce,
+        /// altrimenti contro la difficoltà del prodigio. La Volontà si spende comunque, anche se la prova fallisce.
+        /// <paramref name="players"/> sono le posizioni dei giocatori nella scena, per i prodigi su compagni e gruppo.
+        /// </summary>
+        public List<CombatEvent> Cast(string caster, Pose from, string spellId, int? enemyId, string? ally, double now,
+            IReadOnlyDictionary<string, Pose> players, out string? refusal)
+        {
+            List<CombatEvent> events = [];
+            refusal = null;
+            if (FighterOf(caster) is not { } fighter) { refusal = "Non sei in gioco."; return events; }
+            if (Grimoire.Find(spellId) is not { } spell) { refusal = $"Non esiste un prodigio «{spellId}»."; return events; }
+            if (!fighter.Knows(spell))
+            {
+                refusal = $"Non conosci {spell.Name}: serve un grado in {Grimoire.Skill(spell.Tradition)} e il livello {Grimoire.LevelFor(spell.Tier)}.";
+                return events;
+            }
+            if (fighter.IsDown) { refusal = "Sei a terra: aspetta di rialzarti."; return events; }
+            if (now < fighter.NextCastAt) return events;
+            if (fighter.Resolve < spell.Cost) { refusal = $"Ti manca la Volontà: {spell.Name} costa {spell.Cost}, ne hai {fighter.Resolve}."; return events; }
+
+            Enemy? enemy = null;
+            Fighter? friend = null;
+            Pose at = from;
+            switch (spell.Target)
+            {
+                case SpellTarget.Enemy:
+                    if (enemyId is not { } id || EnemyOf(id) is not { IsDead: false } e) { refusal = $"{spell.Name} va lanciato su un nemico."; return events; }
+                    if (Distance(from.X, from.Z, e.Pose.X, e.Pose.Z) > spell.Range) { refusal = $"Troppo lontano per {spell.Name} (al massimo {spell.Range:0} metri)."; return events; }
+                    if (!Map.HasLineOfSight(from.X, from.Z, e.Pose.X, e.Pose.Z)) { refusal = "Non vedi il bersaglio."; return events; }
+                    enemy = e;
+                    at = e.Pose;
+                    break;
+                case SpellTarget.Ally:
+                    friend = ally is null || ally.IsSameName(caster) ? fighter : FighterOf(ally);
+                    if (friend is null || friend.IsDown) { refusal = "Quel compagno non può ricevere il prodigio."; return events; }
+                    if (friend != fighter)
+                    {
+                        if (!players.TryGetValue(friend.Name, out var p) || Distance(from.X, from.Z, p.X, p.Z) > spell.Range)
+                        { refusal = $"{friend.Name} è troppo lontano (al massimo {spell.Range:0} metri)."; return events; }
+                        at = p;
+                    }
+                    break;
+            }
+
+            fighter.NextCastAt = now + CastCooldown;
+            fighter.Resolve -= spell.Cost;
+            int against = enemy?.Defense ?? spell.Difficulty;
+            var (roll, total, success, critical) = Resolve(fighter.CastBonus(spell.Tradition), against);
+            int pietas = fighter.TraitValue(Characters.Trait.Pietas), ingenium = fighter.TraitValue(Characters.Trait.Ingenium);
+            int amount = 0;
+            double duration = 0;
+            string? target = enemy?.Label ?? friend?.Name;
+
+            if (success)
+                switch (spell.Id)
                 {
-                    bool levelled = f.Gain(enemy.Experience);
-                    events.Add(new VitalsChanged(f));
-                    if (levelled) events.Add(new LevelUp(f));
+                    case "dardo":
+                        amount = Damage(2, 6, critical) + ingenium / 2;
+                        break;
+                    case "catene":
+                        duration = enemy!.Rank == EnemyRank.Boss ? 2 : 4;
+                        enemy.StunnedUntil = now + duration;
+                        break;
+                    case "fiamma":
+                        amount = Damage(2, 8, critical) + ingenium / 2;
+                        break;
+                    case "mano":
+                        amount = Math.Min(Damage(2, 6, critical) + pietas, friend!.MaxHealth - friend.Health);
+                        friend.Health += amount;
+                        events.Add(new VitalsChanged(friend));
+                        break;
+                    case "egida":
+                        duration = 20;
+                        foreach (var f in _fighters.Values.Where(f => !f.IsDown && (f == fighter ||
+                                     players.TryGetValue(f.Name, out var p) && Distance(from.X, from.Z, p.X, p.Z) <= spell.Range)))
+                        {
+                            f.AegisBonus = 3;
+                            f.AegisUntil = now + duration;
+                            amount++;
+                        }
+                        target = amount == 1 ? caster : $"{amount} compagni";
+                        break;
+                    case "folgore":
+                        amount = Damage(3, 8, critical) + pietas;
+                        break;
+                    case "occhio":
+                        duration = 15;
+                        amount = _enemies.Count;
+                        break;
+                    case "esorcismo":
+                        amount = Grimoire.IsUndead(enemy!.Kind) ? Damage(3, 6, critical) + pietas : Damage(1, 6, critical);
+                        break;
+                    case "pan":
+                        duration = 6;
+                        foreach (var e in _enemies.Values.Where(e => e.Rank != EnemyRank.Boss && Distance(from.X, from.Z, e.Pose.X, e.Pose.Z) <= spell.Range))
+                        {
+                            e.FleeingUntil = now + duration;
+                            e.Target = null;
+                            amount++;
+                        }
+                        break;
+                }
+
+            events.Add(new Miracle(caster, spell, roll, total, against, success, target, amount, duration, at.X, at.Z));
+            events.Add(new VitalsChanged(fighter));
+
+            // i danni: al bersaglio, o a tutti quelli vicini per la Fiamma di Vulcano
+            if (success && enemy is not null && amount > 0 && spell.Id is "dardo" or "fiamma" or "folgore" or "esorcismo")
+            {
+                var hit = spell.Id == "fiamma"
+                    ? _enemies.Values.Where(e => Distance(at.X, at.Z, e.Pose.X, e.Pose.Z) <= 3f).ToList()
+                    : [enemy];
+                foreach (var e in hit)
+                {
+                    e.Health = Math.Max(0, e.Health - amount);
+                    e.Target ??= fighter.Name;
+                    events.Add(new Blow(fighter.Name, null, e.Label, e.Id, roll, total, against, true, critical, amount, e.Health, e.MaxHealth, e.IsDead, true));
+                    if (e.IsDead) Defeat(e, events);
                 }
             }
             return events;
+
+            int Damage(int count, int sides, bool crit)
+            {
+                int sum = 0;
+                for (int i = 0; i < count * (crit ? 2 : 1); i++) sum += dice.D(sides);
+                return sum;
+            }
         }
 
         /// <summary>
@@ -1328,9 +1473,23 @@ namespace LexArcana.Combat
         {
             List<CombatEvent> events = [];
 
+            foreach (var f in _fighters.Values)
+            {
+                if (f.AegisBonus > 0 && now >= f.AegisUntil) f.AegisBonus = 0;
+                if (f.IsDown || f.Resolve >= f.MaxResolve) { f.NextResolveAt = now + ResolveRegenEvery; continue; }
+                if (f.NextResolveAt == 0) f.NextResolveAt = now + ResolveRegenEvery;
+                if (now >= f.NextResolveAt)
+                {
+                    f.Resolve++;
+                    f.NextResolveAt = now + ResolveRegenEvery;
+                    events.Add(new VitalsChanged(f));
+                }
+            }
+
             foreach (var f in _fighters.Values.Where(f => f.IsDown && f.RespawnAt > 0 && now >= f.RespawnAt))
             {
                 f.Health = f.MaxHealth;
+                f.Resolve = f.MaxResolve;
                 f.RespawnAt = 0;
                 events.Add(new Respawned(f, Map.Spawns[Math.Abs(f.Name.GetHashCode(StringComparison.OrdinalIgnoreCase)) % Map.Spawns.Length]));
                 events.Add(new VitalsChanged(f));
@@ -1339,6 +1498,20 @@ namespace LexArcana.Combat
             List<Enemy> moved = [];
             foreach (var enemy in _enemies.Values)
             {
+                if (now < enemy.StunnedUntil) continue; // fermo nelle Catene di Saturno
+                if (now < enemy.FleeingUntil)
+                {
+                    // Terrore di Pan: scappa dal giocatore più vicino
+                    var near = players.Values.OrderBy(p => Distance(p.X, p.Z, enemy.Pose.X, enemy.Pose.Z)).Cast<Pose?>().FirstOrDefault();
+                    if (near is { } n)
+                    {
+                        float fx = enemy.Pose.X - n.X, fz = enemy.Pose.Z - n.Z, fd = MathF.Max(MathF.Sqrt(fx * fx + fz * fz), 0.001f);
+                        float step = enemy.Kind.Speed * dt / fd;
+                        enemy.Pose = Map.Slide(enemy.Pose, fx * step, fz * step, MathF.Atan2(fx, fz));
+                        if (Distance(enemy.Pose.X, enemy.Pose.Z, enemy.LastSent.X, enemy.LastSent.Z) > 0.03f) { enemy.LastSent = enemy.Pose; moved.Add(enemy); }
+                    }
+                    continue;
+                }
                 var target = ChooseTarget(enemy, players);
                 enemy.Target = target?.Name;
                 var pose = enemy.Pose;
@@ -1484,6 +1657,10 @@ namespace LexArcana.Combat
         public float Reach => Kind.Reach * (Rank == EnemyRank.Boss ? 1.25f : 1f);
 
         internal string? Target { get; set; }
+        /// <summary>Fermato dalle Catene di Saturno fino a questo istante.</summary>
+        internal double StunnedUntil { get; set; }
+        /// <summary>In fuga per il Terrore di Pan fino a questo istante.</summary>
+        internal double FleeingUntil { get; set; }
         internal double NextAttackAt { get; set; }
         internal Pose LastSent { get; set; }
 
@@ -1506,6 +1683,7 @@ namespace LexArcana.Combat
             Experience = character?.Experience ?? 0;
             Level = Progression.LevelFor(Experience);
             Health = MaxHealth;
+            Resolve = MaxResolve;
         }
 
         public string Name { get; }
@@ -1515,11 +1693,25 @@ namespace LexArcana.Combat
         public bool IsDown => Health <= 0;
         internal double RespawnAt { get; set; }
         internal double NextAttackAt { get; set; }
+        internal double NextCastAt { get; set; }
+        internal double NextResolveAt { get; set; }
+        internal double AegisUntil { get; set; }
+
+        /// <summary>La Volontà: la riserva da cui si pagano i prodigi.</summary>
+        public int Resolve { get; internal set; }
+        public int MaxResolve => (_character?.Resolve ?? 6) + (Level - 1);
+        public IReadOnlyList<Spell> Spells => Grimoire.Known(_character, Level);
+        public bool Knows(Spell spell) => Spells.Contains(spell);
+
+        /// <summary>Il bonus della prova di un prodigio: attributo + abilità della tradizione + bonus di livello.</summary>
+        public int CastBonus(Tradition t) => _character is { } c ? c[Grimoire.Trait(t)] + c.SkillRank(Grimoire.Skill(t)) + LevelBonus : 0;
+        public int TraitValue(Trait t) => _character?[t] ?? 1;
 
         private int LevelBonus => (Level - 1) / 2;
 
         public int MaxHealth => (_character?.Health ?? DefaultHealth) + 3 * (Level - 1);
-        public int Defense => (_character?.Defense ?? DefaultDefense) + LevelBonus;
+        public int Defense => (_character?.Defense ?? DefaultDefense) + LevelBonus + AegisBonus;
+        internal int AegisBonus { get; set; }
         public int MeleeBonus => (_character?.CheckBonus("Armi") ?? DefaultMelee) + LevelBonus;
         public int RangedBonus => (_character?.CheckBonus("Tiro") ?? DefaultRanged) + LevelBonus;
         public int MeleeDamageBonus => (_character is { } c ? c[Trait.Robur] / 2 : 1) + LevelBonus;
@@ -1536,8 +1728,74 @@ namespace LexArcana.Combat
             if (level == Level) return false;
             Level = level;
             Health = MaxHealth;
+            Resolve = MaxResolve;
             return true;
         }
+    }
+}
+
+// ===== src/LexArcana.Core/Combat/Magic.cs =====
+namespace LexArcana.Combat
+{
+    /// <summary>Le tre vie della magia: ognuna si appoggia a un'abilità e a un attributo.</summary>
+    public enum Tradition
+    {
+        /// <summary>Incantesimi: il sapere proibito degli eruditi (Erudizione + Ingenium).</summary>
+        Incantesimi,
+        /// <summary>Miracoli divini: la grazia degli dei (Riti + Pietas).</summary>
+        Miracoli,
+        /// <summary>Invocazioni: gli spiriti, i Lari e i Mani (Presagi + Pietas).</summary>
+        Invocazioni,
+    }
+
+    /// <summary>Su chi si lancia un prodigio.</summary>
+    public enum SpellTarget { Enemy, Ally, Party, None }
+
+    /// <summary>
+    /// Un prodigio. Tier 1 si conosce subito, 2 dal livello 3, 3 dal livello 5, purché si abbia almeno un grado
+    /// nell'abilità della sua tradizione. Cost in punti Volontà; Range in metri.
+    /// </summary>
+    public sealed record Spell(string Id, string Name, Tradition Tradition, int Tier, int Cost, SpellTarget Target, float Range, string Description)
+    {
+        /// <summary>La difficoltà della prova per i prodigi che non colpiscono un nemico (per quelli, la sua Difesa).</summary>
+        public int Difficulty => 8 + 2 * Tier;
+    }
+
+    public static class Grimoire
+    {
+        public static IReadOnlyList<Spell> All { get; } =
+        [
+            new("dardo", "Dardo di luce", Tradition.Incantesimi, 1, 2, SpellTarget.Enemy, 18, "Una freccia di luce bianca: 2d6 + metà di Ingenium."),
+            new("catene", "Catene di Saturno", Tradition.Incantesimi, 2, 3, SpellTarget.Enemy, 14, "Il tempo si ferma intorno al nemico: non si muove né colpisce per 4 secondi."),
+            new("fiamma", "Fiamma di Vulcano", Tradition.Incantesimi, 3, 5, SpellTarget.Enemy, 16, "Un'esplosione di fuoco: 2d8 + metà di Ingenium a tutti i nemici entro 3 metri dal bersaglio."),
+            new("mano", "Mano di Asclepio", Tradition.Miracoli, 1, 2, SpellTarget.Ally, 12, "Guarisce un compagno, o te stesso: 2d6 + Pietas."),
+            new("egida", "Egida di Minerva", Tradition.Miracoli, 2, 3, SpellTarget.Party, 8, "+3 alla Difesa tua e dei compagni entro 8 metri, per 20 secondi."),
+            new("folgore", "Folgore di Giove", Tradition.Miracoli, 3, 5, SpellTarget.Enemy, 20, "Un fulmine dal cielo: 3d8 + Pietas."),
+            new("occhio", "Occhio dell'augure", Tradition.Invocazioni, 1, 1, SpellTarget.None, 0, "Per 15 secondi vedi tutti i nemici del luogo, anche attraverso i muri."),
+            new("esorcismo", "Esorcismo dei Mani", Tradition.Invocazioni, 2, 3, SpellTarget.Enemy, 12, "Contro lemuri e scheletri 3d6 + Pietas; contro gli altri solo 1d6."),
+            new("pan", "Terrore di Pan", Tradition.Invocazioni, 3, 4, SpellTarget.Party, 9, "I nemici entro 9 metri fuggono in preda al panico per 6 secondi."),
+        ];
+
+        public static Spell? Find(string idOrName) =>
+            All.FirstOrDefault(s => s.Id.Equals(idOrName, StringComparison.OrdinalIgnoreCase) || s.Name.Equals(idOrName, StringComparison.OrdinalIgnoreCase));
+
+        public static string Skill(Tradition t) => t switch
+        {
+            Tradition.Incantesimi => "Erudizione",
+            Tradition.Miracoli => "Riti",
+            _ => "Presagi",
+        };
+
+        public static Trait Trait(Tradition t) => t == Tradition.Incantesimi ? Characters.Trait.Ingenium : Characters.Trait.Pietas;
+
+        public static int LevelFor(int tier) => tier switch { 1 => 1, 2 => 3, _ => 5 };
+
+        /// <summary>I prodigi che un personaggio conosce al suo livello.</summary>
+        public static IReadOnlyList<Spell> Known(Character? character, int level) =>
+            character is null ? [] : [.. All.Where(s => character.SkillRank(Skill(s.Tradition)) > 0 && level >= LevelFor(s.Tier))];
+
+        /// <summary>Le creature su cui l'Esorcismo dei Mani ha pieno effetto.</summary>
+        public static bool IsUndead(EnemyKind kind) => kind.Id is "lemure" or "scheletro";
     }
 }
 
@@ -2339,6 +2597,10 @@ namespace LexArcana.Net
                     case LevelUp(var f):
                         messages.Add((new Narrated($"{f.Name} sale al livello {f.Level}: salute piena, colpi più sicuri."), null));
                         break;
+                    case Miracle m:
+                        messages.Add((new SpellCast(m.Caster, m.Spell.Id, m.Spell.Name, m.Spell.Tradition.ToString(), m.Roll, m.Total, m.Against,
+                            m.Success, m.Target, m.Amount, m.Duration, m.X, m.Z), null));
+                        break;
                     case Respawned(var f, var pose):
                         _poses[f.Name] = pose;
                         messages.Add((new Moved(f.Name, pose.X, pose.Z, pose.Yaw), null));
@@ -2360,7 +2622,7 @@ namespace LexArcana.Net
             new(e.Id, e.Kind.Id, e.Name, e.Level, e.Health, e.MaxHealth, e.Pose.X, e.Pose.Z, e.Pose.Yaw, e.Rank.ToString());
 
         private static Vitals ToVitals(Fighter f) =>
-            new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown);
+            new(f.Name, f.Health, f.MaxHealth, f.Level, f.Experience, f.NextLevelAt, f.IsDown, f.Resolve, f.MaxResolve, [.. f.Spells.Select(s => s.Id)]);
 
         private async Task AcceptLoopAsync(CancellationToken ct)
         {
@@ -2508,6 +2770,7 @@ namespace LexArcana.Net
             SetSheet(var fields) => SetSheetFields(player.Name, fields),
             Embody(var character) => EmbodyAs(player, character),
             Attack(var enemyId, var ranged) => AttackWith(player, enemyId, ranged),
+            Cast(var spell, var enemyId, var ally) => CastBy(player, spell, enemyId, ally),
             ShowSheet(var owner) => Sheet(owner ?? player.Name),
             ListPlayers => new PlayerList(Present()),
             Move(var x, var z, var yaw) => MoveTo(player, new Pose(x, z, yaw)),
@@ -2584,6 +2847,18 @@ namespace LexArcana.Net
             lock (_combatLock) vitals = ToVitals(Combat.Join(player.Name, character));
             player.Send(vitals);
             return sheetReply;
+        }
+
+        private Refused? CastBy(Player player, string spell, int? enemyId, string? ally)
+        {
+            var pose = _poses.GetValueOrDefault(player.Name, Map.Spawns[0]);
+            var players = _poses.Where(p => _inWorld.ContainsKey(p.Key) || p.Key.IsSameName(player.Name)).ToDictionary(p => p.Key, p => p.Value, StringComparer.OrdinalIgnoreCase);
+            List<(ServerMessage, string?)> messages;
+            string? refusal;
+            lock (_combatLock) messages = Translate(Combat.Cast(player.Name, pose, spell, enemyId, ally, Now, players, out refusal));
+            // il bersaglio della Mano di Asclepio riceve la sua salute nuova, gli altri vedono il prodigio
+            Publish(messages);
+            return refusal is null ? null : new Refused(refusal);
         }
 
         private Refused? AttackWith(Player player, int enemyId, bool ranged)
@@ -2974,6 +3249,8 @@ namespace LexArcana.Net
               /sussurra <nome> <testo>     parla in privato (il Demiurgo sente tutto)
               /scheda [nome]               mostra la tua scheda o quella di un compagno
               /imposta <campo> [valore]    scrivi un campo della tua scheda; senza valore lo cancelli
+              /lancia <prodigio> [nome]    un prodigio su di te o su un compagno, es. /lancia mano Livia
+                                           (quelli sui nemici si lanciano nella scena 3D, con 1 2 3)
               /chi                         chi è presente
               /aiuto                       questo elenco
               /esci                        lascia la sessione
@@ -2998,6 +3275,9 @@ namespace LexArcana.Net
                 "imposta" => CommandLine.FirstWord(rest) is ({ Length: > 0 } key, var value)
                     ? new PlayerInput.Send(new SetField(key, value))
                     : new PlayerInput.Invalid("Uso: /imposta <campo> [valore], es. /imposta Ferite 2"),
+                "lancia" => CommandLine.FirstWord(rest) is ({ Length: > 0 } spell, var ally)
+                    ? new PlayerInput.Send(new Cast(spell, null, ally.Length == 0 ? null : ally))
+                    : new PlayerInput.Invalid("Uso: /lancia <prodigio> [nome], es. /lancia mano Livia"),
                 "chi" => new PlayerInput.Send(new ListPlayers()),
                 "aiuto" or "?" => new PlayerInput.ShowHelp(),
                 "esci" => new PlayerInput.Quit(),
@@ -3291,6 +3571,7 @@ namespace LexArcana.Protocol
     [JsonDerivedType(typeof(Embody), "embody")]
     [JsonDerivedType(typeof(Attack), "attack")]
     [JsonDerivedType(typeof(Command), "command")]
+    [JsonDerivedType(typeof(Cast), "cast")]
     public abstract record ClientMessage;
 
     /// <summary>Il primo messaggio di ogni client: chi è e, se serve, la parola d'ordine.</summary>
@@ -3314,6 +3595,8 @@ namespace LexArcana.Protocol
     public sealed record Attack(int EnemyId, bool Ranged = false) : ClientMessage;
     /// <summary>Un comando del Demiurgo che conduce da remoto, es. "/narra …" o "/avventura 2".</summary>
     public sealed record Command(string Line) : ClientMessage;
+    /// <summary>Lancia un prodigio (vedi Grimoire): su un nemico (EnemyId), su un compagno (Ally) o senza bersaglio.</summary>
+    public sealed record Cast(string Spell, int? EnemyId = null, string? Ally = null) : ClientMessage;
 
     /// <summary>Un messaggio dal server a un giocatore (e al Demiurgo).</summary>
     [JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
@@ -3334,6 +3617,7 @@ namespace LexArcana.Protocol
     [JsonDerivedType(typeof(EnemyMoves), "enemy_moves")]
     [JsonDerivedType(typeof(Struck), "struck")]
     [JsonDerivedType(typeof(Vitals), "vitals")]
+    [JsonDerivedType(typeof(SpellCast), "spell")]
     public abstract record ServerMessage;
 
     /// <summary>L'accoglienza: chi c'è, il luogo (righe della mappa) e dove si trova ognuno, te compreso.</summary>
@@ -3375,7 +3659,14 @@ namespace LexArcana.Protocol
         int Health, int MaxHealth, bool Defeated, bool Ranged = false,
         int? AttackerEnemyId = null, int? TargetEnemyId = null) : ServerMessage;
     /// <summary>Salute, livello ed esperienza di un giocatore.</summary>
-    public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down) : ServerMessage;
+    public sealed record Vitals(string Name, int Health, int MaxHealth, int Level, int Experience, int NextLevel, bool Down,
+        int Resolve = 0, int MaxResolve = 0, string[]? Spells = null) : ServerMessage;
+    /// <summary>
+    /// Un prodigio lanciato. Spell è l'id nel grimorio, Name il nome da mostrare; Target chi lo riceve; Amount danni, cure
+    /// o quanti ne sono colpiti; Duration la durata dell'effetto in secondi; X, Z dove avviene.
+    /// </summary>
+    public sealed record SpellCast(string Caster, string Spell, string Name, string Tradition, int Roll, int Total, int Against, bool Success,
+        string? Target = null, int Amount = 0, double Duration = 0, float X = 0, float Z = 0) : ServerMessage;
 }
 
 // ===== src/LexArcana.Core/Protocol/Wire.cs =====
@@ -3474,6 +3765,9 @@ namespace LexArcana.Ui
                 case Struck s:
                     Blow(t, s);
                     break;
+                case SpellCast c:
+                    Spell(t, c);
+                    break;
                 case EnemyList(var enemies) when enemies.Length > 0:
                     t.Add($"† {enemies.Length} nemici nel luogo", Tone.Pompeian).Add(
                         $" · livello {enemies.Min(e => e.Level)}–{enemies.Max(e => e.Level)}" +
@@ -3486,6 +3780,28 @@ namespace LexArcana.Ui
         }
 
         private bool IsViewer(string name) => name.IsSameName(viewer);
+
+        private void Spell(StyledText t, SpellCast c)
+        {
+            string who = IsViewer(c.Caster) ? "Tu" : c.Caster.Sanitized;
+            var tone = c.Tradition switch { "Miracoli" => Tone.Gilt, "Invocazioni" => Tone.Verdigris, _ => Tone.Bronze };
+            t.Add("❦ ", tone).Add(who, Tone.Bronze, bold: true)
+             .Add(IsViewer(c.Caster) ? " invochi " : " invoca ", Tone.Muted).Add(c.Name.Sanitized, tone, bold: true);
+            if (c.Target is { Length: > 0 } target && c.Spell is "mano" or "catene" or "egida")
+                t.Add($" su {(IsViewer(target) ? "di te" : target.Sanitized)}", Tone.Muted);
+            t.Add($"  [{c.Roll}] {c.Total} contro {c.Against}", Tone.Muted);
+            if (!c.Success) { t.Add(": il prodigio non risponde.", Tone.Muted, italic: true); return; }
+            string effect = c.Spell switch
+            {
+                "mano" => $": +{c.Amount} salute",
+                "catene" => $": fermo per {c.Duration:0} secondi",
+                "egida" => $": +3 alla Difesa per {c.Duration:0} secondi",
+                "occhio" => $": vedi {c.Amount} nemici per {c.Duration:0} secondi",
+                "pan" => c.Amount == 0 ? ": nessun nemico abbastanza vicino" : $": {c.Amount} nemici fuggono",
+                _ => "",
+            };
+            if (effect.Length > 0) t.Add(effect, tone);
+        }
 
         private void Blow(StyledText t, Struck s)
         {
