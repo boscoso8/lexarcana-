@@ -93,6 +93,13 @@ internal sealed class VisioneApp(GameClient client, GameMap initialMap, VisioneO
         Raylib.SetConfigFlags(browser ? ConfigFlags.Msaa4xHint : ConfigFlags.Msaa4xHint | ConfigFlags.ResizableWindow | ConfigFlags.VSyncHint);
         Raylib.InitWindow(width, height, $"Lex Arcana · {client.Name}");
         Raylib.SetExitKey(KeyboardKey.Null);
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "lex.png");
+        if (!browser && File.Exists(iconPath))
+        {
+            var icon = Raylib.LoadImage(iconPath);   // l'icona della finestra, nella barra delle applicazioni
+            Raylib.SetWindowIcon(icon);
+            Raylib.UnloadImage(icon);
+        }
         if (!browser) Raylib.SetTargetFPS(60); // nel browser il ritmo lo dà requestAnimationFrame
         if (options.Touch) { _touch = new TouchControls(options.TouchPoints); _mouseCaptured = false; }
         else Raylib.DisableCursor();

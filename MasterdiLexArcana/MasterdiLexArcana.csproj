@@ -9,6 +9,11 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <OutputType>Exe</OutputType>
+    <!-- l'icona di Lex Arcana: dal repository, accanto al progetto o nella cartella sopra (es. D:\LexArcana\lex.ico) -->
+    <ApplicationIcon Condition="Exists('lex.ico')">lex.ico</ApplicationIcon>
+    <ApplicationIcon Condition="'$(ApplicationIcon)' == '' and Exists('..\lex.ico')">..\lex.ico</ApplicationIcon>
+    <ApplicationIcon Condition="'$(ApplicationIcon)' == '' and Exists('..\assets\lex.ico')">..\assets\lex.ico</ApplicationIcon>
+    <NoWarn>$(NoWarn);NETSDK1074</NoWarn>
     <!-- solo il suo file: niente altri .cs dalle cartelle vicine o annidate -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <AssemblyName>masterdilexarcana</AssemblyName>

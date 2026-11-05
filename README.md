@@ -247,6 +247,10 @@ dotnet publish src/LexArcana.Visione -c Release -r win-x64 --self-contained
 
 I dadi usano la notazione standard: `d20`, `3d6+2`, `1d8+1d4-1` (fino a 100 dadi da 2–1000 facce).
 
+## Icona
+
+`assets/lex.ico` è l'icona di Lex Arcana, con "LEX" in Cinzel dorato e "arcana" su fondo basalto, dentro una cornice pompeiana. Contiene le dimensioni da 16 a 256 pixel; quelle piccole hanno solo "LEX" o la "L", perché una scritta lì non si leggerebbe. È l'icona degli eseguibili Windows, della finestra 3D e della pagina web, compresa l'icona sulla schermata Home dell'iPhone. Si rigenera con `python3 tools/genera-icona.py`, che richiede Pillow.
+
 ## Struttura
 
 - `src/LexArcana.Core`: la logica, senza dipendenze esterne.

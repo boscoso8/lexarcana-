@@ -4,6 +4,9 @@
     <!-- Exe e non WinExe: su Windows resta una console, così gli errori di connessione si vedono. -->
     <OutputType>Exe</OutputType>
     <AssemblyName>lexarcana-visione</AssemblyName>
+    <!-- l'icona degli eseguibili Windows (su Linux e macOS l'SDK non può incorporarla: si ignora l'avviso NETSDK1074) -->
+    <ApplicationIcon>..\..\assets\lex.ico</ApplicationIcon>
+    <NoWarn>$(NoWarn);NETSDK1074</NoWarn>
     <RootNamespace>LexArcana.Visione</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

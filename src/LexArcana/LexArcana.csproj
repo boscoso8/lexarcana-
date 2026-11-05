@@ -3,6 +3,9 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>lexarcana</AssemblyName>
+    <!-- l'icona degli eseguibili Windows (su Linux e macOS l'SDK non può incorporarla: si ignora l'avviso NETSDK1074) -->
+    <ApplicationIcon>..\..\assets\lex.ico</ApplicationIcon>
+    <NoWarn>$(NoWarn);NETSDK1074</NoWarn>
     <RootNamespace>LexArcana.App</RootNamespace>
     <!-- dotnet publish produce un eseguibile nativo che non richiede .NET installato -->
     <PublishAot>true</PublishAot>
